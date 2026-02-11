@@ -1,10 +1,10 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-/** * YEDP ACTION DIRECTOR - V8.11 (Normal Map Added)
- * - Feat: Added Pass 4 for 'Normal Map' using standard 'MeshNormalMaterial'.
- * - Logic: Normal Map applies to Geo_Depth meshes (body).
- * - Logic: Retains Canny (Matcap) and Depth (Manual) logic.
+/** * YEDP ACTION DIRECTOR - V8.16 (Final Polish)
+ * - Fix: Increased bottom padding in 'onResize' to 35px.
+ * - Result: Viewport now stops before the resize handle, preventing "pop out".
+ * - Logic: Retains infinite scaling and dynamic widget height calculation.
  */
 
 // --- DYNAMIC LOADER ---
@@ -23,7 +23,7 @@ const loadThreeJS = async () => {
         };
 
         try {
-            console.log("[Yedp] Initializing Engine (V8.11)...");
+            console.log("[Yedp] Initializing Engine (V8.16)...");
             const THREE = await import("https://esm.sh/three@0.160.0");
             const { OrbitControls } = await import("https://esm.sh/three@0.160.0/examples/jsm/controls/OrbitControls.js?deps=three@0.160.0");
             const { GLTFLoader } = await import("https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js?deps=three@0.160.0");
@@ -253,7 +253,7 @@ class YedpViewport {
             </div>
             <div style="display:flex; gap:4px;">
                 <span id="lbl-res" style="color:#00d2ff; font-family:monospace; font-size:10px; margin-right:5px; align-self:center;">512x512</span>
-                <button id="btn-bake" class="yedp-btn" style="border:1px solid #ff0055; color:#ff0055; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer;">BAKE V8.11</button>
+                <button id="btn-bake" class="yedp-btn" style="border:1px solid #ff0055; color:#ff0055; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer;">BAKE V8.16</button>
             </div>
         `;
 
@@ -834,7 +834,8 @@ app.registerExtension({
 
                 // FIX 1: ComputeSize now returns a SAFE, fixed minimum height (400px).
                 // It does NOT depend on 'this.size[1]' anymore, breaking the infinite loop.
-                widget.computeSize = (w) => [w, 400];
+                // UPDATED V8.13: Reduced min height to allow vertical down-scaling.
+                widget.computeSize = (w) => [w, 0];
                 
                 setTimeout(() => {
                     const vp = new YedpViewport(this, container);
@@ -843,11 +844,25 @@ app.registerExtension({
                         if (onResizeOrig) onResizeOrig.call(this, size);
                         
                         // FIX 2: Manually clamp the container height to fit the node.
-                        // We subtract ~30px for the node header to prevent overflow.
-                        // This forces the DOM to obey the node size, rather than the node obeying the DOM.
-                        const safeHeight = Math.max(200, size[1] - 30);
+                        // UPDATED V8.15: Dynamically calculate space used by widgets above.
+                        // We subtract ~30px for header + height of widgets before the viewport.
+                        
+                        let usedHeight = 30; // Node header approx
+                        if (this.widgets) {
+                            for (const w of this.widgets) {
+                                if (w === widget) break;
+                                // Estimate height of widgets above (default ~26px)
+                                const h = w.last_h || 26; 
+                                usedHeight += h;
+                            }
+                        }
+                        
+                        // Safe height is Node Total Height - Used Height - Padding
+                        // UPDATED V8.16: Increased bottom padding to 35px to clear the footer/resize handle.
+                        const safeHeight = Math.max(10, size[1] - usedHeight - 35);
+                        
                         container.style.height = safeHeight + "px";
-                        container.style.maxHeight = safeHeight + "px";
+                        container.style.maxHeight = "none";
                         
                         // Pass the strict container size to the 3D engine
                         vp.onResize(container.querySelector(".yedp-vp-area"));
