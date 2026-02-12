@@ -1,5 +1,7 @@
 # **🎬 ComfyUI Yedp Action Director**
 
+**UPDATE:Added bvh to the list of imported format (experimental)
+
 ![preview](https://github.com/user-attachments/assets/1ecd1b2b-ec4c-475c-9268-4485f70d5415)
 
 **A powerful 3D viewport node for ComfyUI to direct, preview, and batch-render 3D character animations for ControlNet workflows.**
