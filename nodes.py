@@ -12,8 +12,9 @@ import hashlib
 import time
 
 # --- CONFIGURATION ---
+# ADDED .bvh TO THE ALLOWED EXTENSIONS SET SO THE FRONTEND CAN SEE THEM
 if "yedp_anims" not in folder_paths.folder_names_and_paths:
-    folder_paths.folder_names_and_paths["yedp_anims"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_anims")], {".glb", ".fbx"})
+    folder_paths.folder_names_and_paths["yedp_anims"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_anims")], {".glb", ".fbx", ".bvh"})
 
 class YedpActionDirector:
     """
@@ -118,4 +119,3 @@ async def get_animations(request):
     if not files:
         files = []
     return web.json_response({"files": files})
-
