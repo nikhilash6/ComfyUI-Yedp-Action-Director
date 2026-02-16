@@ -68,6 +68,8 @@ Unlike static image loaders, this node performs the rendering **client-side** (i
   * *Solution:* Depending on your browser zoom, the viewport might initialize at size 0\. Simply **resize the node slightly** by dragging the bottom-right corner, and the viewport will snap into place.  
 * **"Animation not found":**  
   * Ensure your files are in ComfyUI/input/yedp\_anims/. Refresh your browser if you just added them.
+* **"slow downs":**  
+  * the node as been tested on Chrome browser, potential issues might occur on other browsers.
 
 ## **📜 License**
 
