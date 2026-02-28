@@ -23,6 +23,7 @@ import { api } from "/scripts/api.js";
  * - Fix (9.9): Removed destructive position overrides to restore full Root Motion (hips moving through space).
  * - Fix (9.9): Decoupled internal engine time from integer UI slider to fix playback freezing on non-30 FPS values.
  * - Update (9.10): Upgraded all rendering passes (Depth, Canny, Normal) to 100% lossless pure PNG now that payload size limits are removed.
+ * - Fix (Camera): Added OrbitControls target to keyframes to fix panning and zooming translation issues.
  */
 
 const loadThreeJS = async () => {
@@ -523,11 +524,19 @@ class YedpViewport {
         const btnSetEnd = createBtn("Set End");
         
         btnSetStart.onclick = () => {
-            this.camKeys.start = { pos: this.camera.position.clone(), quat: this.camera.quaternion.clone() };
+            this.camKeys.start = { 
+                pos: this.camera.position.clone(), 
+                quat: this.camera.quaternion.clone(),
+                target: this.controls.target.clone() // Fixed: Also save the OrbitControls target for panning
+            };
             btnSetStart.innerText = "Start Set ✓"; btnSetStart.style.borderColor = "#0f0";
         };
         btnSetEnd.onclick = () => {
-            this.camKeys.end = { pos: this.camera.position.clone(), quat: this.camera.quaternion.clone() };
+            this.camKeys.end = { 
+                pos: this.camera.position.clone(), 
+                quat: this.camera.quaternion.clone(),
+                target: this.controls.target.clone() // Fixed: Also save the OrbitControls target for panning
+            };
             btnSetEnd.innerText = "End Set ✓"; btnSetEnd.style.borderColor = "#0f0";
         };
         
@@ -772,6 +781,11 @@ class YedpViewport {
 
         this.camera.position.lerpVectors(this.camKeys.start.pos, this.camKeys.end.pos, t);
         this.camera.quaternion.slerpQuaternions(this.camKeys.start.quat, this.camKeys.end.quat, t);
+        
+        // Fixed: Lerp OrbitControls target for panning and zooming support
+        if (this.controls && this.camKeys.start.target && this.camKeys.end.target) {
+            this.controls.target.lerpVectors(this.camKeys.start.target, this.camKeys.end.target, t);
+        }
     }
 
     animate() {
