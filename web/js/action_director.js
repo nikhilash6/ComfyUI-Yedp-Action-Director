@@ -1,7 +1,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-/** * YEDP ACTION DIRECTOR - V9.11 (Full PNG Export)
+/** * YEDP ACTION DIRECTOR - V9.16 (Full Scene Control)
  * - Added: Support for up to 4 characters in the same scene.
  * - Added: TransformControls for moving and rotating characters individually.
  * - Added: Sidebar UI for independent character animation selection and looping.
@@ -20,14 +20,18 @@ import { api } from "/scripts/api.js";
  * - Update (9.7): Added tiny Mesh Counter [M:1 | F:1 | Pose:1] to UI for immediate parsing feedback.
  * - Fix (9.8): Added timestamp Cache-Buster to Rig/Animation loaders to prevent browser from loading stale GLB files.
  * - Update (9.8): Added verbose console logging for mesh categorization transparency.
- * - Fix (9.9): Removed destructive position overrides to restore full Root Motion (hips moving through space).
- * - Fix (9.9): Decoupled internal engine time from integer UI slider to fix playback freezing on non-30 FPS values.
- * - Update (9.10): Upgraded all rendering passes (Depth, Canny, Normal) to 100% lossless pure PNG now that payload size limits are removed.
+ * - Fix (9.9): Removed destructive position overrides to restore full Root Motion.
+ * - Fix (9.9): Decoupled internal engine time from integer UI slider to fix playback freezing.
+ * - Update (9.10): Upgraded all rendering passes (Depth, Canny, Normal) to 100% lossless pure PNG.
  * - Fix (Camera): Added OrbitControls target to keyframes to fix panning and zooming translation issues.
  * - Update (Offline): Pointed all imports to the same local directory.
- * - Fix (9.11): Ensured "none" is always available in animation lists to fix UI default-selection mismatches.
- * - Fix (9.11): Forcefully hide the skeleton during all baking passes to prevent contamination of the OpenPose render.
- * - Update (9.12): Overhauled UI with floating Gizmo icons, Blender shortcuts, collapsible right menus, and high-visibility Depth inputs.
+ * - Fix (9.11): Ensured "none" is always available in animation lists to fix UI mismatches.
+ * - Fix (9.11): Forcefully hide the skeleton during all baking passes to prevent OpenPose contamination.
+ * - Update (9.12): Overhauled UI with floating Gizmo icons, Blender shortcuts, collapsible right menus.
+ * - Update (9.13): Added Orthographic vs Perspective camera toggles, FOV slider, Viewport View Cube, and color-coded UI categories.
+ * - Update (9.14): Added Shaded toggle (Clay mode), Transform Panel (Pos/Rot/Scale X,Y,Z), Lighting Category (Ambient, Dir, Point, Spot + Shadows), and Single Frame Bake.
+ * - Update (9.15): Converted OpenPose meshes to BasicMaterial for unlit accurate preview, fixed Shaded mode to correctly display depth geometry, added Shaded output pass.
+ * - Update (9.16): Fixed camera target offset when rotating via Transform UI. Added live sync between viewport and text inputs. Fixed FOV UI layout.
  */
 
 const loadThreeJS = async () => {
@@ -36,7 +40,7 @@ const loadThreeJS = async () => {
     return window._YEDP_THREE_CACHE = new Promise(async (resolve, reject) => {
         const baseUrl = new URL(".", import.meta.url).href;
         try {
-            console.log("[Yedp] Initializing Engine V9.11 (Offline Mode)...");
+            console.log("[Yedp] Initializing Engine V9.16 (Offline Mode)...");
             
             // Loaded locally from the same folder
             const THREE = await import(new URL("./three.module.js", baseUrl).href);
@@ -169,10 +173,10 @@ class CharacterInstance {
             if(child.isMesh) {
                 child.visible = true; 
                 child.frustumCulled = false; 
+                child.castShadow = true;
+                child.receiveShadow = true;
                 
                 // V9.7 FIX: Ancestry String Builder
-                // This solves Blender's 'Object vs Mesh Data' naming conflict 
-                // by flattening the entire parent chain into a single string.
                 let fullPath = "";
                 let curr = child;
                 while (curr && curr !== this.scene && curr !== null) {
@@ -187,6 +191,23 @@ class CharacterInstance {
                 if (n.includes("openpose") || n.includes("pose")) {
                     this.poseMeshes.push(child);
                     category = "Pose";
+                    
+                    // Force OpenPose to be completely immune to lighting (MeshBasicMaterial)
+                    if (child.material) {
+                        const processMat = (mat) => {
+                            const oldColor = mat.color || new THREE.Color(0xffffff);
+                            const newMat = new THREE.MeshBasicMaterial({ color: oldColor, skinning: true });
+                            if (mat.map) { newMat.map = mat.map; newMat.color.setHex(0xffffff); }
+                            return newMat;
+                        };
+                        
+                        if (Array.isArray(child.material)) {
+                            child.material = child.material.map(processMat);
+                        } else {
+                            child.material = processMat(child.material);
+                        }
+                    }
+
                 } else if (n.includes("depthf") || n.includes("female") || n.includes("woman") || n.includes("|f|") || n.endsWith("f|")) {
                     this.hasFemaleMesh = true;
                     this.depthMeshesF.push(child);
@@ -204,7 +225,6 @@ class CharacterInstance {
                     category = "Prop (Fallback)";
                 }
                 
-                // Verbose logging for transparent debugging of the exporter output
                 if(this.id === 1) {
                     console.log(`[Yedp] Parsed Mesh: "${child.name}" -> categorized as [${category}]`);
                 }
@@ -235,15 +255,25 @@ class YedpViewport {
         
         this.scene = null;
         this.camera = null;
+        this.perspCam = null;
+        this.orthoCam = null;
+        this.isOrthographic = false;
+
         this.renderer = null;
         this.controls = null;
         this.transformControls = null;
         this.clock = null;
         
         this.baseRig = null;
-        this.characters = []; // Array of CharacterInstance
-        this.activeCharId = null; 
+        
+        this.characters = []; 
         this.charCounter = 0;
+
+        this.lights = [];
+        this.lightCounter = 0;
+
+        // Unified Selection System
+        this.selected = { obj: null, type: null, id: null }; // type: 'character', 'light', 'camera'
 
         this.gridHelper = null;
         this.axesHelper = null;
@@ -253,12 +283,14 @@ class YedpViewport {
         this.camKeys = { start: null, end: null, ease: 'linear' };
         
         // Materials
+        this.shadedMat = null; // Clay material
         this.depthMat = null;
         this.cannyMat = null; 
         this.normalMat = null; 
         this.originalMaterials = new Map();
         
         // Control States
+        this.isShadedMode = false;
         this.isDepthMode = false;
         this.userNear = 0.1;
         this.userFar = 10.0;
@@ -267,8 +299,6 @@ class YedpViewport {
 
         this.isPlaying = false;
         this.isBaking = false; 
-        
-        // V9.9 FIX: Fully decouple global internal time from UI slider to avoid fraction truncation freezes
         this.globalTime = 0;
         
         this.renderWidth = 512;
@@ -278,6 +308,8 @@ class YedpViewport {
         // UI references
         this.uiSidebar = null;
         this.uiCharList = null;
+        this.uiLightList = null;
+        this.uiTransformInputs = {};
 
         this.isHovered = false;
         this._handleKeyDown = this.handleKeyDown.bind(this);
@@ -297,6 +329,7 @@ class YedpViewport {
             this.BVHLoader = libs.BVHLoader;
             window._YEDP_SKEL_UTILS = libs.SkeletonUtils;
 
+            this.shadedMat = new this.THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.6, metalness: 0.1, skinning: true });
             this.depthMat = new this.THREE.MeshDepthMaterial({ depthPacking: this.THREE.BasicDepthPacking, skinning: true });
             this.cannyMat = new this.THREE.MeshMatcapMaterial({ matcap: this.createRimTexture(), skinning: true });
             this.normalMat = new this.THREE.MeshNormalMaterial({ skinning: true });
@@ -319,7 +352,7 @@ class YedpViewport {
             Object.assign(this.uiSidebar.style, {
                 width: "240px", flex: "0 0 240px", background: "#1a1a1a", borderLeft: "1px solid #333",
                 display: "flex", flexDirection: "column", overflowY: "auto", padding: "8px", boxSizing: "border-box",
-                gap: "10px", fontSize: "11px", color: "#ccc"
+                gap: "8px", fontSize: "11px", color: "#ccc"
             });
             this.container.appendChild(this.uiSidebar);
 
@@ -347,24 +380,40 @@ class YedpViewport {
             this.clock = new this.THREE.Clock();
             this.scene = new this.THREE.Scene();
             this.scene.background = new this.THREE.Color(0x1a1a1a); 
-            
-            this.scene.add(new this.THREE.AmbientLight(0xffffff, 1.2));
-            const dirLight = new this.THREE.DirectionalLight(0x00d2ff, 1.5);
-            dirLight.position.set(5, 10, 7);
-            this.scene.add(dirLight);
 
             this.gridHelper = new this.THREE.GridHelper(10, 10, 0x444444, 0x222222);
             this.scene.add(this.gridHelper);
             this.axesHelper = new this.THREE.AxesHelper(1);
             this.scene.add(this.axesHelper);
 
-            this.camera = new this.THREE.PerspectiveCamera(45, 1, 0.01, 2000); 
-            this.camera.position.set(0, 1.2, 4);
+            // Invisible Floor for receiving shadows
+            const floorGeo = new this.THREE.PlaneGeometry(50, 50);
+            const floorMat = new this.THREE.ShadowMaterial({ opacity: 0.6 });
+            this.floor = new this.THREE.Mesh(floorGeo, floorMat);
+            this.floor.rotation.x = -Math.PI / 2;
+            this.floor.receiveShadow = true;
+            this.scene.add(this.floor);
+
+            // Setup Cameras (Dual Setup)
+            const aspect = this.renderWidth / this.renderHeight || 1;
+            this.perspCam = new this.THREE.PerspectiveCamera(45, aspect, 0.01, 2000);
+            this.perspCam.position.set(0, 1.2, 4);
+
+            const d = 2.0; // Base Frustum size
+            this.orthoCam = new this.THREE.OrthographicCamera(-d * aspect, d * aspect, d, -d, 0.01, 2000);
+            this.orthoCam.position.set(0, 1.2, 4);
+
+            this.camera = this.perspCam;
+            this.isOrthographic = false;
             
             this.renderer = new this.THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
             if (this.renderer.outputColorSpace) this.renderer.outputColorSpace = this.THREE.SRGBColorSpace;
             else this.renderer.outputEncoding = this.THREE.sRGBEncoding;
             
+            // Enable Shadows
+            this.renderer.shadowMap.enabled = true;
+            this.renderer.shadowMap.type = this.THREE.PCFSoftShadowMap;
+
             viewportDiv.appendChild(this.renderer.domElement);
             Object.assign(this.renderer.domElement.style, { width: "100%", height: "100%", display: "block" });
 
@@ -373,7 +422,7 @@ class YedpViewport {
             Object.assign(this.gate.style, {
                 position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
                 border: "2px solid #00d2ff", boxShadow: "0 0 0 9999px rgba(0, 0, 0, 0.65)", pointerEvents: "none", zIndex: "10",
-                boxSizing: "content-box" // Critical fix for preventing collapse
+                boxSizing: "content-box" 
             });
             viewportDiv.appendChild(this.gate);
 
@@ -381,17 +430,35 @@ class YedpViewport {
             this.controls = new this.OrbitControls(this.camera, this.renderer.domElement);
             this.controls.target.set(0, 1, 0);
             this.controls.enableDamping = true;
+            
+            // Link OrbitControls to UI Text Inputs to sync on drag
+            this.controls.addEventListener('change', () => {
+                if (this.selected && this.selected.type === 'camera' && this.uiTransformInputs) {
+                    const isTyping = Object.values(this.uiTransformInputs).some(inp => inp === document.activeElement);
+                    if (!isTyping) this.updateTransformUIFromObject();
+                }
+            });
 
             this.transformControls = new this.TransformControls(this.camera, this.renderer.domElement);
             this.transformControls.addEventListener('dragging-changed', (event) => {
                 this.controls.enabled = !event.value;
+            });
+            this.transformControls.addEventListener('change', () => {
+                this.updateTransformUIFromObject();
             });
             this.scene.add(this.transformControls);
 
             this.setupHeader(headerDiv);
             this.setupTimeline(timelineDiv);
             this.buildGizmoPanel(viewportDiv);
+            this.buildViewNav(viewportDiv);
             this.buildSidebar();
+            
+            // Add default lights
+            this.addLight("ambient");
+            this.addLight("directional");
+            const dl = this.lights[1].light;
+            dl.position.set(2, 4, 3);
             
             await this.fetchAnimations();
             await this.loadBaseRig();
@@ -427,7 +494,9 @@ class YedpViewport {
     // --- UI SETUP ---
     setupHeader(div) {
         div.innerHTML = `
-            <div style="display:flex; align-items:center; gap:6px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <label style="color:#ccc; font-size:11px; cursor:pointer;"><input type="checkbox" id="chk-shaded"> Shaded</label>
+                <div style="width:1px; height:16px; background:#444;"></div>
                 <label style="color:#ccc; font-size:11px; cursor:pointer;"><input type="checkbox" id="chk-depth"> Depth</label>
                 <div id="depth-ctrls" style="display:flex; align-items:center; gap:4px; opacity:0.5; transition:opacity 0.2s;">
                     <span style="color:#4ade80; font-size:10px; font-weight:bold;">NEAR DEPTH:</span>
@@ -435,25 +504,33 @@ class YedpViewport {
                     <span style="color:#4ade80; font-size:10px; font-weight:bold; margin-left:4px;">FAR DEPTH:</span>
                     <input id="inp-far" type="number" step="0.5" value="10.0" style="width:40px; background:#111; color:#4ade80; border:1px solid #4ade80; font-size:10px; padding:1px 2px; border-radius:2px; font-weight:bold;">
                 </div>
+                <div style="width:1px; height:16px; background:#444;"></div>
                 <label style="color:#666; font-size:11px; cursor:pointer;"><input type="checkbox" id="chk-skel" checked> Skel</label>
             </div>
             <div style="display:flex; gap:4px;">
                 <span id="lbl-res" style="color:#00d2ff; font-family:monospace; font-size:10px; margin-right:5px; align-self:center;">512x512</span>
-                <button id="btn-bake" style="border:1px solid #ff0055; color:#ff0055; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE V9.10</button>
+                <button id="btn-bake-frame" style="border:1px solid #ffaa00; color:#ffaa00; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE FRAME</button>
+                <button id="btn-bake" style="border:1px solid #ff0055; color:#ff0055; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE V9.16</button>
             </div>
         `;
 
+        div.querySelector("#chk-shaded").onchange = (e) => { 
+            this.isShadedMode = e.target.checked; 
+            this.updateVisibilities(); 
+        };
         div.querySelector("#inp-near").onchange = (e) => { this.userNear = parseFloat(e.target.value); if(this.isDepthMode) this.updateCameraBounds(); };
         div.querySelector("#inp-far").onchange = (e) => { this.userFar = parseFloat(e.target.value); if(this.isDepthMode) this.updateCameraBounds(); };
         div.querySelector("#chk-depth").onchange = (e) => {
-            const act = e.target.checked;
-            div.querySelector("#depth-ctrls").style.opacity = act ? "1.0" : "0.5";
-            this.toggleDepthMode(act);
+            this.isDepthMode = e.target.checked;
+            div.querySelector("#depth-ctrls").style.opacity = this.isDepthMode ? "1.0" : "0.5";
+            this.updateVisibilities();
         };
         div.querySelector("#chk-skel").onchange = (e) => {
             this.characters.forEach(c => { if(c.skeletonHelper) c.skeletonHelper.visible = e.target.checked; });
         };
-        div.querySelector("#btn-bake").onclick = () => this.performBatchRender();
+        
+        div.querySelector("#btn-bake-frame").onclick = () => this.performBake(true);
+        div.querySelector("#btn-bake").onclick = () => this.performBake(false);
     }
 
     setupTimeline(div) {
@@ -494,11 +571,11 @@ class YedpViewport {
     }
 
     handleKeyDown(e) {
-        if (!this.isHovered || !this.activeCharId || this.isBaking || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        if (!this.isHovered || !this.selected.obj || this.isBaking || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
         const k = e.key.toLowerCase();
         if (k === 'g') { this.transformControls.setMode("translate"); this.updateGizmoUI("translate"); }
         if (k === 'r') { this.transformControls.setMode("rotate"); this.updateGizmoUI("rotate"); }
-        if (k === 's') { this.transformControls.setMode("scale"); this.updateGizmoUI("scale"); }
+        if (k === 's' && this.selected.type === 'character') { this.transformControls.setMode("scale"); this.updateGizmoUI("scale"); }
     }
 
     buildGizmoPanel(vpDiv) {
@@ -538,8 +615,8 @@ class YedpViewport {
         panel.append(
             createIconBtn("translate", pathMove, "Move (G)", () => { this.transformControls.setMode("translate"); this.updateGizmoUI("translate"); }),
             createIconBtn("rotate", pathRot, "Rotate (R)", () => { this.transformControls.setMode("rotate"); this.updateGizmoUI("rotate"); }),
-            createIconBtn("scale", pathScale, "Scale (S)", () => { this.transformControls.setMode("scale"); this.updateGizmoUI("scale"); }),
-            createIconBtn("deselect", pathDeselect, "Deselect", () => { this.transformControls.detach(); this.activeCharId = null; this.refreshSidebarHighlights(); this.updateGizmoUI("none"); })
+            createIconBtn("scale", pathScale, "Scale (S)", () => { if(this.selected.type === 'character') { this.transformControls.setMode("scale"); this.updateGizmoUI("scale"); } }),
+            createIconBtn("deselect", pathDeselect, "Deselect", () => { this.selectObject(null, null, null); })
         );
         vpDiv.appendChild(panel);
         this.updateGizmoUI("translate");
@@ -559,7 +636,60 @@ class YedpViewport {
                 b.style.color = "#ccc";
                 b.style.borderColor = "#555";
             }
+            
+            // Disable scale if not character
+            if (k === 'scale' && this.selected.type !== 'character') {
+                b.style.opacity = "0.3"; b.style.pointerEvents = "none";
+            } else if (k === 'scale') {
+                b.style.opacity = "1.0"; b.style.pointerEvents = "auto";
+            }
         });
+    }
+
+    buildViewNav(vpDiv) {
+        const nav = document.createElement("div");
+        Object.assign(nav.style, {
+            position: "absolute", top: "10px", right: "10px", zIndex: "100",
+            display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px",
+            background: "rgba(20,20,20,0.8)", padding: "6px", borderRadius: "6px", border: "1px solid #333"
+        });
+
+        const createViewBtn = (lbl, dir) => {
+            const b = document.createElement("button");
+            b.innerText = lbl;
+            Object.assign(b.style, {
+                background: "#222", color: "#ccc", border: "1px solid #444", borderRadius: "3px",
+                cursor: "pointer", fontSize: "9px", padding: "4px 8px", fontWeight: "bold",
+                transition: "all 0.1s"
+            });
+            b.onmouseover = () => { b.style.background = "#00d2ff"; b.style.color = "#000"; b.style.borderColor = "#00d2ff"; };
+            b.onmouseout = () => { b.style.background = "#222"; b.style.color = "#ccc"; b.style.borderColor = "#444"; };
+            
+            b.onclick = () => {
+                const dist = this.camera.position.distanceTo(this.controls.target);
+                const tgt = this.controls.target;
+                const p = this.camera.position;
+                
+                switch(dir) {
+                    case 'top': p.set(tgt.x, tgt.y + dist, tgt.z); break;
+                    case 'bottom': p.set(tgt.x, tgt.y - dist, tgt.z); break;
+                    case 'front': p.set(tgt.x, tgt.y, tgt.z + dist); break;
+                    case 'back': p.set(tgt.x, tgt.y, tgt.z - dist); break;
+                    case 'left': p.set(tgt.x - dist, tgt.y, tgt.z); break;
+                    case 'right': p.set(tgt.x + dist, tgt.y, tgt.z); break;
+                }
+                this.controls.update(); 
+                this.updateTransformUIFromObject();
+            };
+            return b;
+        };
+        
+        nav.append(
+            createViewBtn("TOP", "top"), createViewBtn("BTM", "bottom"),
+            createViewBtn("LEFT", "left"), createViewBtn("RIGHT", "right"), 
+            createViewBtn("FRONT", "front"), createViewBtn("BACK", "back")
+        );
+        vpDiv.appendChild(nav);
     }
 
     buildSidebar() {
@@ -574,14 +704,20 @@ class YedpViewport {
 
         const createCollapsible = (titleText, defaultOpen) => {
             const wrap = document.createElement("div");
-            Object.assign(wrap.style, { background: "#222", borderRadius: "4px", marginBottom: "8px", border: "1px solid #333" });
+            Object.assign(wrap.style, { background: "#222", borderRadius: "4px", border: "1px solid #333" });
             
             const head = document.createElement("div");
-            Object.assign(head.style, { background: "#1a1a1a", padding: "8px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: defaultOpen ? "1px solid #333" : "none", borderTopLeftRadius: "4px", borderTopRightRadius: "4px" });
+            Object.assign(head.style, { 
+                background: "#16252d", 
+                borderLeft: "3px solid #00d2ff", 
+                padding: "8px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", 
+                borderBottom: defaultOpen ? "1px solid #333" : "none", 
+                borderTopRightRadius: "4px", borderBottomRightRadius: defaultOpen ? "0px" : "4px" 
+            });
             
             const titleSpan = document.createElement("span");
-            Object.assign(titleSpan.style, { fontWeight: "bold", color: "#aaa", fontSize: "11px", display: "flex", alignItems: "center", gap: "4px" });
-            titleSpan.innerHTML = `<span style="color:#666; font-size:9px;">${defaultOpen ? '▼' : '▶'}</span> ${titleText}`;
+            Object.assign(titleSpan.style, { fontWeight: "bold", color: "#fff", fontSize: "11px", display: "flex", alignItems: "center", gap: "6px" });
+            titleSpan.innerHTML = `<span style="color:#00d2ff; font-size:9px;">${defaultOpen ? '▼' : '▶'}</span> ${titleText}`;
 
             head.appendChild(titleSpan);
 
@@ -589,20 +725,101 @@ class YedpViewport {
             Object.assign(content.style, { padding: "8px", display: defaultOpen ? "flex" : "none", flexDirection: "column", gap: "6px" });
 
             head.onclick = (e) => {
-                if (e.target.tagName === 'BUTTON') return; 
+                if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') return; 
                 const isOpen = content.style.display !== "none";
                 content.style.display = isOpen ? "none" : "flex";
                 head.style.borderBottom = isOpen ? "none" : "1px solid #333";
-                titleSpan.innerHTML = `<span style="color:#666; font-size:9px;">${isOpen ? '▶' : '▼'}</span> ${titleText}`;
+                head.style.borderBottomRightRadius = isOpen ? "4px" : "0px";
+                titleSpan.innerHTML = `<span style="color:#00d2ff; font-size:9px;">${isOpen ? '▶' : '▼'}</span> ${titleText}`;
             };
 
             wrap.append(head, content);
             return { wrap, head, content };
         };
 
-        // --- CAMERA SEQUENCE (Collapsible) ---
-        const camCol = createCollapsible("Camera Sequence", false);
+        // --- TRANSFORM PANEL (Collapsible) ---
+        const transCol = createCollapsible("Transform", true);
+        const tRow = (lbl, keys) => {
+            const r = document.createElement("div"); r.style.display = "flex"; r.style.gap = "4px"; r.style.alignItems = "center";
+            const l = document.createElement("span"); l.innerText = lbl; l.style.width = "20px"; l.style.color = "#888";
+            r.appendChild(l);
+            keys.forEach(k => {
+                const inp = document.createElement("input"); inp.type = "number"; inp.step = "0.1";
+                Object.assign(inp.style, { flex: "1", width: "0", background: "#111", color: "#fff", border: "1px solid #444", fontSize: "10px", padding: "2px" });
+                inp.onchange = () => this.updateObjectFromTransformUI();
+                this.uiTransformInputs[k] = inp;
+                r.appendChild(inp);
+            });
+            return r;
+        };
+        transCol.content.append(
+            tRow("Pos", ['px', 'py', 'pz']),
+            tRow("Rot", ['rx', 'ry', 'rz']),
+            tRow("Scl", ['sx', 'sy', 'sz'])
+        );
+        this.uiSidebar.appendChild(transCol.wrap);
+
+        // --- CAMERA (Collapsible) ---
+        const camCol = createCollapsible("Camera", false);
         
+        // Ortho and FOV Row
+        const camSettingsRow = document.createElement("div");
+        Object.assign(camSettingsRow.style, { display: "flex", gap: "6px", alignItems: "center", marginBottom: "4px", flexWrap: "wrap" });
+        
+        const btnSelCam = createBtn("Select Cam", "#334", "#445");
+        btnSelCam.style.flex = "0 0 auto";
+        btnSelCam.onclick = () => this.selectObject(this.camera, 'camera', 'main');
+
+        const lblOrtho = document.createElement("label");
+        Object.assign(lblOrtho.style, { cursor: "pointer", display: "flex", gap: "4px", color: "#ccc", fontSize: "10px", alignItems: "center" });
+        const chkOrtho = document.createElement("input"); chkOrtho.type = "checkbox"; chkOrtho.checked = this.isOrthographic;
+        lblOrtho.append(chkOrtho, "Ortho");
+
+        const fovContainer = document.createElement("div");
+        Object.assign(fovContainer.style, { display: "flex", gap: "4px", alignItems: "center", flex: "1", transition: "opacity 0.2s", minWidth: "0" });
+        const lblFov = document.createElement("span"); lblFov.innerText = "FOV"; Object.assign(lblFov.style, {fontSize: "10px", color: "#888"});
+        const sldFov = document.createElement("input"); sldFov.type = "range"; sldFov.min = 10; sldFov.max = 120; sldFov.value = this.perspCam.fov; 
+        Object.assign(sldFov.style, { flex: "1", width: "0", minWidth: "30px" });
+        const valFov = document.createElement("input"); valFov.type = "number"; valFov.min = 10; valFov.max = 120; valFov.value = this.perspCam.fov; 
+        Object.assign(valFov.style, { fontSize: "10px", color: "#00d2ff", width: "36px", background: "#111", border: "1px solid #444", padding: "1px 2px", borderRadius: "2px", textAlign: "right" });
+        
+        fovContainer.append(lblFov, sldFov, valFov);
+        camSettingsRow.append(btnSelCam, lblOrtho, fovContainer);
+
+        // Wiring Camera Toggles
+        chkOrtho.onchange = (e) => {
+            this.isOrthographic = e.target.checked;
+            fovContainer.style.opacity = this.isOrthographic ? "0.3" : "1.0";
+            sldFov.disabled = this.isOrthographic;
+            valFov.disabled = this.isOrthographic;
+
+            const oldCam = this.isOrthographic ? this.perspCam : this.orthoCam;
+            this.camera = this.isOrthographic ? this.orthoCam : this.perspCam;
+
+            this.camera.position.copy(oldCam.position);
+            this.camera.quaternion.copy(oldCam.quaternion);
+            this.camera.zoom = oldCam.zoom;
+
+            this.controls.object = this.camera;
+            if (this.selected.type !== 'camera') this.transformControls.camera = this.camera;
+            
+            if (this.selected.type === 'camera') this.selectObject(this.camera, 'camera', 'main');
+            const vpArea = this.container.querySelector(".yedp-vp-area");
+            if (vpArea) this.onResize(vpArea); // Force UI update
+        };
+
+        sldFov.oninput = (e) => {
+            valFov.value = e.target.value;
+            this.perspCam.fov = parseFloat(e.target.value);
+            this.perspCam.updateProjectionMatrix();
+        };
+
+        valFov.oninput = (e) => {
+            sldFov.value = e.target.value;
+            this.perspCam.fov = parseFloat(e.target.value);
+            this.perspCam.updateProjectionMatrix();
+        };
+
         const camRow1 = document.createElement("div"); camRow1.style.display = "flex"; camRow1.style.gap = "4px"; camRow1.style.marginBottom = "4px";
         const btnSetStart = createBtn("Set Start");
         const btnSetEnd = createBtn("Set End");
@@ -611,7 +828,8 @@ class YedpViewport {
             this.camKeys.start = { 
                 pos: this.camera.position.clone(), 
                 quat: this.camera.quaternion.clone(),
-                target: this.controls.target.clone()
+                target: this.controls.target.clone(),
+                zoom: this.camera.zoom
             };
             btnSetStart.innerText = "Start Set ✓"; btnSetStart.style.borderColor = "#0f0";
         };
@@ -619,7 +837,8 @@ class YedpViewport {
             this.camKeys.end = { 
                 pos: this.camera.position.clone(), 
                 quat: this.camera.quaternion.clone(),
-                target: this.controls.target.clone()
+                target: this.controls.target.clone(),
+                zoom: this.camera.zoom
             };
             btnSetEnd.innerText = "End Set ✓"; btnSetEnd.style.borderColor = "#0f0";
         };
@@ -639,8 +858,20 @@ class YedpViewport {
 
         camRow1.append(btnSetStart, btnSetEnd);
         camRow2.append(selEase, btnClearCam);
-        camCol.content.append(camRow1, camRow2);
+        camCol.content.append(camSettingsRow, camRow1, camRow2);
         this.uiSidebar.appendChild(camCol.wrap);
+
+        // --- LIGHTING (Collapsible) ---
+        const lightCol = createCollapsible("Lighting", true);
+        const btnAddLight = createBtn("+ Add Light", "#542", "#653");
+        btnAddLight.style.flex = "none"; btnAddLight.style.padding = "2px 6px"; btnAddLight.style.fontSize = "9px";
+        btnAddLight.onclick = (e) => { e.stopPropagation(); this.addLight(); };
+        lightCol.head.appendChild(btnAddLight);
+        
+        this.uiLightList = document.createElement("div");
+        this.uiLightList.style.display = "flex"; this.uiLightList.style.flexDirection = "column"; this.uiLightList.style.gap = "6px";
+        lightCol.content.appendChild(this.uiLightList);
+        this.uiSidebar.appendChild(lightCol.wrap);
 
         // --- CHARACTERS (Collapsible) ---
         const charCol = createCollapsible("Characters", true);
@@ -655,15 +886,235 @@ class YedpViewport {
         charCol.content.appendChild(this.uiCharList);
 
         this.uiSidebar.appendChild(charCol.wrap);
+        
+        this.updateTransformUIFromObject();
+    }
+
+    // --- SELECTION & TRANSFORM ---
+    selectObject(obj, type, id) {
+        this.selected = { obj, type, id };
+        
+        if (!obj) {
+            this.transformControls.detach();
+        } else if (type === 'camera') {
+            this.transformControls.detach(); // Dragging active camera is buggy, use text inputs or viewport nav
+        } else {
+            this.transformControls.attach(type === 'character' ? obj.scene : obj.group);
+            if (type === 'light' && this.transformControls.getMode() === 'scale') {
+                this.transformControls.setMode('translate'); // No scaling lights
+            }
+        }
+        
+        this.updateGizmoUI(this.transformControls.getMode());
+        this.refreshSidebarHighlights();
+        this.updateTransformUIFromObject();
+    }
+
+    updateTransformUIFromObject() {
+        const ui = this.uiTransformInputs;
+        const s = this.selected;
+        if (!s.obj) {
+            Object.values(ui).forEach(inp => { inp.value = "0.0"; inp.disabled = true; inp.style.opacity = "0.3"; });
+            return;
+        }
+        
+        const tgt = s.type === 'character' ? s.obj.scene : (s.type === 'light' ? s.obj.group : s.obj);
+        
+        Object.values(ui).forEach(inp => { inp.disabled = false; inp.style.opacity = "1.0"; });
+        
+        ui.px.value = tgt.position.x.toFixed(2); ui.py.value = tgt.position.y.toFixed(2); ui.pz.value = tgt.position.z.toFixed(2);
+        ui.rx.value = this.THREE.MathUtils.radToDeg(tgt.rotation.x).toFixed(1); 
+        ui.ry.value = this.THREE.MathUtils.radToDeg(tgt.rotation.y).toFixed(1); 
+        ui.rz.value = this.THREE.MathUtils.radToDeg(tgt.rotation.z).toFixed(1);
+        
+        if (s.type !== 'character') {
+            ui.sx.disabled = ui.sy.disabled = ui.sz.disabled = true;
+            ui.sx.style.opacity = ui.sy.style.opacity = ui.sz.style.opacity = "0.3";
+            ui.sx.value = ui.sy.value = ui.sz.value = "1.0";
+        } else {
+            ui.sx.value = tgt.scale.x.toFixed(2); ui.sy.value = tgt.scale.y.toFixed(2); ui.sz.value = tgt.scale.z.toFixed(2);
+        }
+    }
+
+    updateObjectFromTransformUI() {
+        const s = this.selected;
+        if (!s.obj) return;
+        const tgt = s.type === 'character' ? s.obj.scene : (s.type === 'light' ? s.obj.group : s.obj);
+        const ui = this.uiTransformInputs;
+        
+        const px = parseFloat(ui.px.value)||0;
+        const py = parseFloat(ui.py.value)||0;
+        const pz = parseFloat(ui.pz.value)||0;
+        const rx = this.THREE.MathUtils.degToRad(parseFloat(ui.rx.value)||0);
+        const ry = this.THREE.MathUtils.degToRad(parseFloat(ui.ry.value)||0);
+        const rz = this.THREE.MathUtils.degToRad(parseFloat(ui.rz.value)||0);
+
+        if (s.type === 'camera') {
+            // Apply Translation (which also moves the target to preserve look angle)
+            const deltaPos = new this.THREE.Vector3(px, py, pz).sub(this.camera.position);
+            this.camera.position.add(deltaPos);
+            this.controls.target.add(deltaPos);
+
+            // Apply Rotation (which requires calculating a new target pushed out along the forward vector)
+            const dist = this.camera.position.distanceTo(this.controls.target) || 1.0;
+            this.camera.rotation.set(rx, ry, rz);
+            const forward = new this.THREE.Vector3(0, 0, -1).applyEuler(this.camera.rotation);
+            this.controls.target.copy(this.camera.position).add(forward.multiplyScalar(dist));
+            
+            this.controls.update();
+        } else {
+            tgt.position.set(px, py, pz);
+            tgt.rotation.set(rx, ry, rz);
+            if (s.type === 'character') {
+                tgt.scale.set(parseFloat(ui.sx.value)||1, parseFloat(ui.sy.value)||1, parseFloat(ui.sz.value)||1);
+            }
+        }
     }
 
     refreshSidebarHighlights() {
-        Array.from(this.uiCharList.children).forEach(card => {
-            const isActive = card.dataset.id == this.activeCharId;
+        if(this.uiCharList) Array.from(this.uiCharList.children).forEach(card => {
+            const isActive = this.selected.type === 'character' && card.dataset.id == this.selected.id;
+            card.style.borderColor = isActive ? "#00d2ff" : "#444";
+        });
+        if(this.uiLightList) Array.from(this.uiLightList.children).forEach(card => {
+            const isActive = this.selected.type === 'light' && card.dataset.id == this.selected.id;
             card.style.borderColor = isActive ? "#00d2ff" : "#444";
         });
     }
 
+    // --- LIGHTING LOGIC ---
+    addLight(presetType = 'point') {
+        this.lightCounter++;
+        const id = this.lightCounter;
+        
+        const group = new this.THREE.Group();
+        group.position.set(0, 2, 2);
+        
+        const helperMat = new this.THREE.MeshBasicMaterial({color:0xffaa00, wireframe:true});
+        const helperGeo = new this.THREE.SphereGeometry(0.15, 4, 4);
+        const helper = new this.THREE.Mesh(helperGeo, helperMat);
+        group.add(helper);
+
+        const lObj = { id, group, helper, light: null, type: presetType, color: '#ffffff', intensity: 1.0, range: 10, angle: 45, castShadow: true };
+        this.lights.push(lObj);
+        this.scene.add(group);
+        
+        this.updateLightType(lObj);
+        this.renderLightCards();
+    }
+
+    removeLight(id) {
+        const idx = this.lights.findIndex(l => l.id === id);
+        if (idx === -1) return;
+        const l = this.lights[idx];
+        if (this.selected.type === 'light' && this.selected.id === id) this.selectObject(null, null, null);
+        this.scene.remove(l.group);
+        this.lights.splice(idx, 1);
+        this.renderLightCards();
+    }
+
+    updateLightType(lObj) {
+        if (lObj.light) lObj.group.remove(lObj.light);
+        
+        const c = new this.THREE.Color(lObj.color);
+        switch(lObj.type) {
+            case 'ambient': lObj.light = new this.THREE.AmbientLight(c, lObj.intensity); break;
+            case 'directional': lObj.light = new this.THREE.DirectionalLight(c, lObj.intensity); break;
+            case 'point': lObj.light = new this.THREE.PointLight(c, lObj.intensity, lObj.range); break;
+            case 'spot': 
+                lObj.light = new this.THREE.SpotLight(c, lObj.intensity, lObj.range, this.THREE.MathUtils.degToRad(lObj.angle), 0.5, 1); 
+                break;
+        }
+        
+        if (lObj.type !== 'ambient') {
+            lObj.light.castShadow = lObj.castShadow;
+            if (lObj.light.shadow) {
+                lObj.light.shadow.mapSize.width = 1024;
+                lObj.light.shadow.mapSize.height = 1024;
+            }
+        }
+        
+        lObj.group.add(lObj.light);
+        lObj.helper.visible = lObj.type !== 'ambient'; 
+    }
+
+    renderLightCards() {
+        this.uiLightList.innerHTML = "";
+        this.lights.forEach(l => {
+            const card = document.createElement("div");
+            card.dataset.id = l.id;
+            Object.assign(card.style, { background: "#222", border: "1px solid #444", borderRadius: "4px", padding: "6px" });
+            
+            const head = document.createElement("div");
+            head.style.display = "flex"; head.style.justifyContent = "space-between"; head.style.marginBottom = "4px";
+            
+            const selType = document.createElement("select");
+            Object.assign(selType.style, { background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "1px" });
+            ['ambient', 'directional', 'point', 'spot'].forEach(t => selType.add(new Option(t, t)));
+            selType.value = l.type;
+            selType.onchange = (e) => { l.type = e.target.value; this.updateLightType(l); this.renderLightCards(); };
+            
+            const actBox = document.createElement("div"); actBox.style.display = "flex"; actBox.style.gap = "4px";
+            const btnSel = document.createElement("button"); btnSel.innerText = "Select";
+            Object.assign(btnSel.style, { background: "#444", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px" });
+            btnSel.onclick = () => this.selectObject(l, 'light', l.id);
+            
+            const btnDel = document.createElement("button"); btnDel.innerText = "X";
+            Object.assign(btnDel.style, { background: "#622", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px" });
+            btnDel.onclick = () => this.removeLight(l.id);
+            
+            actBox.append(btnSel, btnDel);
+            head.append(selType, actBox);
+
+            // Controls Grid
+            const ctrls = document.createElement("div");
+            ctrls.style.display = "grid"; ctrls.style.gridTemplateColumns = "1fr 1fr"; ctrls.style.gap = "4px";
+            
+            const wrap = (lbl, elem) => {
+                const d = document.createElement("div"); d.style.display="flex"; d.style.alignItems="center"; d.style.gap="4px";
+                const s = document.createElement("span"); s.innerText = lbl; s.style.fontSize="9px"; s.style.color="#888"; s.style.width="20px";
+                d.append(s, elem); return d;
+            };
+
+            const inpCol = document.createElement("input"); inpCol.type = "color"; inpCol.value = l.color;
+            inpCol.style.width = "100%"; inpCol.style.height = "16px"; inpCol.style.padding = "0"; inpCol.style.border = "none";
+            inpCol.onchange = (e) => { l.color = e.target.value; this.updateLightType(l); };
+
+            const inpInt = document.createElement("input"); inpInt.type = "number"; inpInt.step = "0.1"; inpInt.value = l.intensity;
+            Object.assign(inpInt.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" });
+            inpInt.onchange = (e) => { l.intensity = parseFloat(e.target.value); this.updateLightType(l); };
+
+            ctrls.append(wrap("Col", inpCol), wrap("Int", inpInt));
+
+            if (l.type === 'point' || l.type === 'spot') {
+                const inpRng = document.createElement("input"); inpRng.type = "number"; inpRng.step = "1"; inpRng.value = l.range;
+                Object.assign(inpRng.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" });
+                inpRng.onchange = (e) => { l.range = parseFloat(e.target.value); this.updateLightType(l); };
+                ctrls.append(wrap("Rng", inpRng));
+            }
+
+            if (l.type === 'spot') {
+                const inpAng = document.createElement("input"); inpAng.type = "number"; inpAng.step = "1"; inpAng.value = l.angle;
+                Object.assign(inpAng.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" });
+                inpAng.onchange = (e) => { l.angle = parseFloat(e.target.value); this.updateLightType(l); };
+                ctrls.append(wrap("Ang", inpAng));
+            }
+
+            if (l.type !== 'ambient') {
+                const lblShad = document.createElement("label"); lblShad.style.fontSize="9px"; lblShad.style.color="#ccc"; lblShad.style.display="flex"; lblShad.style.gap="2px"; lblShad.style.alignItems="center";
+                const chkShad = document.createElement("input"); chkShad.type = "checkbox"; chkShad.checked = l.castShadow;
+                chkShad.onchange = (e) => { l.castShadow = e.target.checked; this.updateLightType(l); };
+                lblShad.append(chkShad, "Shadows");
+                ctrls.append(lblShad);
+            }
+
+            card.append(head, ctrls);
+            this.uiLightList.appendChild(card);
+        });
+        this.refreshSidebarHighlights();
+    }
+
+    // --- CHARACTER LOGIC ---
     renderCharacterCards() {
         this.uiCharList.innerHTML = "";
         this.characters.forEach(c => {
@@ -678,12 +1129,7 @@ class YedpViewport {
             const actBox = document.createElement("div"); actBox.style.display = "flex"; actBox.style.gap = "4px";
             const btnSel = document.createElement("button"); btnSel.innerText = "Select";
             Object.assign(btnSel.style, { background: "#444", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px" });
-            btnSel.onclick = () => { 
-                this.activeCharId = c.id; 
-                this.transformControls.attach(c.scene); 
-                this.refreshSidebarHighlights(); 
-                if (this.updateGizmoUI) this.updateGizmoUI(this.transformControls.getMode());
-            };
+            btnSel.onclick = () => this.selectObject(c, 'character', c.id);
             
             const btnDel = document.createElement("button"); btnDel.innerText = "X";
             Object.assign(btnDel.style, { background: "#622", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px" });
@@ -692,7 +1138,7 @@ class YedpViewport {
             actBox.append(btnSel, btnDel);
             head.appendChild(actBox);
             
-            // V9.7 Debug Info to show exactly what meshes got parsed successfully
+            // V9.7 Debug Info
             const meshInfo = document.createElement("div");
             meshInfo.style.fontSize = "9px";
             meshInfo.style.color = "#888";
@@ -722,7 +1168,7 @@ class YedpViewport {
                 c.gender = c.gender === 'M' ? 'F' : 'M';
                 btnGender.innerText = c.gender;
                 btnGender.style.color = c.gender === 'F' ? '#ff66b2' : '#66b2ff';
-                if (this.isDepthMode) this.toggleDepthMode(true);
+                this.updateVisibilities();
             };
 
             const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px";
@@ -781,9 +1227,16 @@ class YedpViewport {
         if (this.characters.length >= 16) { alert("Maximum 16 characters recommended for WebGL performance."); return; }
         this.charCounter++;
         const newChar = new CharacterInstance(this.charCounter, this.baseRig, this.THREE);
+        
         this.scene.add(newChar.scene);
         this.scene.add(newChar.skeletonHelper);
         this.characters.push(newChar);
+
+        // Cache original materials
+        newChar.depthMeshesM.forEach(m => { if(m.isMesh && !this.originalMaterials.has(m)) this.originalMaterials.set(m, m.material); });
+        newChar.depthMeshesF.forEach(m => { if(m.isMesh && !this.originalMaterials.has(m)) this.originalMaterials.set(m, m.material); });
+
+        this.updateVisibilities();
         this.renderCharacterCards();
     }
 
@@ -791,7 +1244,7 @@ class YedpViewport {
         const idx = this.characters.findIndex(c => c.id === id);
         if (idx === -1) return;
         const c = this.characters[idx];
-        if (this.activeCharId === id) { this.transformControls.detach(); this.activeCharId = null; }
+        if (this.selected.type === 'character' && this.selected.id === id) this.selectObject(null, null, null);
         c.destroy(this.scene);
         this.characters.splice(idx, 1);
         this.renderCharacterCards();
@@ -871,10 +1324,18 @@ class YedpViewport {
         this.camera.position.lerpVectors(this.camKeys.start.pos, this.camKeys.end.pos, t);
         this.camera.quaternion.slerpQuaternions(this.camKeys.start.quat, this.camKeys.end.quat, t);
         
-        // Fixed: Lerp OrbitControls target for panning and zooming support
+        // Fixed: Lerp OrbitControls zoom state for orthographic dolly support
+        if (this.camKeys.start.zoom !== undefined && this.camKeys.end.zoom !== undefined) {
+            this.camera.zoom = this.camKeys.start.zoom + (this.camKeys.end.zoom - this.camKeys.start.zoom) * t;
+            this.camera.updateProjectionMatrix();
+        }
+
+        // Fixed: Lerp OrbitControls target for panning translation
         if (this.controls && this.camKeys.start.target && this.camKeys.end.target) {
             this.controls.target.lerpVectors(this.camKeys.start.target, this.camKeys.end.target, t);
         }
+        
+        if (this.selected.type === 'camera') this.updateTransformUIFromObject();
     }
 
     animate() {
@@ -926,29 +1387,35 @@ class YedpViewport {
         this.renderer.render(this.scene, this.camera);
     }
 
-    toggleDepthMode(active) {
-        this.isDepthMode = active;
+    updateVisibilities() {
+        const isDepth = this.isDepthMode;
+        const isShaded = this.isShadedMode;
+
         this.characters.forEach(c => {
-            // Keep inactive meshes hidden at all times
             c.inactiveDepthMeshes.forEach(m => m.visible = false);
             
-            c.activeDepthMeshes.forEach(m => m.visible = active);
-            c.poseMeshes.forEach(m => m.visible = !active);
-            
-            if (active) {
-                 c.activeDepthMeshes.forEach(m => {
-                     if(m.isMesh && !this.originalMaterials.has(m)) this.originalMaterials.set(m, m.material);
-                     m.material = this.depthMat;
-                 });
-            } else {
-                // Restore all materials unconditionally just to be safe
-                c.depthMeshesM.forEach(m => { if(this.originalMaterials.has(m)) m.material = this.originalMaterials.get(m); });
-                c.depthMeshesF.forEach(m => { if(this.originalMaterials.has(m)) m.material = this.originalMaterials.get(m); });
-            }
+            const showDepthMeshes = isDepth || isShaded;
+            c.activeDepthMeshes.forEach(m => {
+                m.visible = showDepthMeshes;
+                if (isDepth) {
+                    m.material = this.depthMat;
+                } else if (isShaded) {
+                    m.material = this.shadedMat;
+                } else {
+                    m.material = this.originalMaterials.get(m) || m.material;
+                }
+            });
+
+            c.poseMeshes.forEach(m => {
+                m.visible = !showDepthMeshes;
+            });
         });
 
-        if (active) this.updateCameraBounds();
-        else this.resetCamera();
+        if (isDepth) {
+            this.updateCameraBounds();
+        } else {
+            this.resetCamera();
+        }
     }
 
     updateCameraBounds() {
@@ -1007,8 +1474,22 @@ class YedpViewport {
         const h = vpDiv.clientHeight;
         if (w && h) {
             this.renderer.setSize(w, h);
-            this.camera.aspect = w / h;
-            this.camera.updateProjectionMatrix();
+            
+            const aspect = w / h;
+            
+            if (this.perspCam) {
+                this.perspCam.aspect = aspect;
+                this.perspCam.updateProjectionMatrix();
+            }
+            
+            if (this.orthoCam) {
+                const frustumSize = 4.0;
+                this.orthoCam.left = -frustumSize * aspect / 2;
+                this.orthoCam.right = frustumSize * aspect / 2;
+                this.orthoCam.top = frustumSize / 2;
+                this.orthoCam.bottom = -frustumSize / 2;
+                this.orthoCam.updateProjectionMatrix();
+            }
             
             const aspectContainer = w / h;
             const aspectTarget = this.renderWidth / this.renderHeight;
@@ -1024,10 +1505,13 @@ class YedpViewport {
         return w ? w.value : defaultVal;
     }
 
-    async performBatchRender() {
+    async performBake(isSingleFrame = false) {
         if (this.characters.length === 0) { alert("No characters added!"); return; }
         const THREE = this.THREE;
-        const btn = this.container.querySelector('#btn-bake');
+        
+        const btnId = isSingleFrame ? '#btn-bake-frame' : '#btn-bake';
+        const originalBtnText = isSingleFrame ? 'BAKE FRAME' : 'BAKE V9.16';
+        const btn = this.container.querySelector(btnId);
         btn.innerText = "PREPARING...";
         
         this.isBaking = true;
@@ -1035,12 +1519,12 @@ class YedpViewport {
         
         // Hide gizmo
         this.transformControls.detach();
-        this.activeCharId = null;
-        this.refreshSidebarHighlights();
+        // Hide light helpers
+        this.lights.forEach(l => l.helper.visible = false);
 
         const originalSize = new THREE.Vector2();
         this.renderer.getSize(originalSize);
-        const originalAspect = this.camera.aspect;
+        const originalAspect = this.camera.aspect || (originalSize.width / originalSize.height);
         const originalZoom = this.camera.zoom;
         const originalBg = this.scene.background;
         
@@ -1053,26 +1537,40 @@ class YedpViewport {
         }
 
         this.renderer.setSize(this.renderWidth, this.renderHeight);
-        this.camera.aspect = this.renderWidth / this.renderHeight;
-        this.camera.updateProjectionMatrix();
+        
+        const targetRenderAspect = this.renderWidth / this.renderHeight;
+        this.perspCam.aspect = targetRenderAspect;
+        this.perspCam.updateProjectionMatrix();
 
-        const frames = this.getWidgetValue("frame_count", 48);
+        const frustumSize = 4.0;
+        this.orthoCam.left = -frustumSize * targetRenderAspect / 2;
+        this.orthoCam.right = frustumSize * targetRenderAspect / 2;
+        this.orthoCam.top = frustumSize / 2;
+        this.orthoCam.bottom = -frustumSize / 2;
+        this.orthoCam.updateProjectionMatrix();
+
+        const totalNodeFrames = this.getWidgetValue("frame_count", 48);
         const fps = this.getWidgetValue("fps", 24);
         const step = 1.0 / fps;
         
-        const results = { pose: [], depth: [], canny: [], normal: [] };
+        // Determine iteration logic based on single vs batch
+        const framesToRender = isSingleFrame ? 1 : totalNodeFrames;
+        const currentUIFrame = parseInt(this.container.querySelector("#t-slider").value) || 0;
+        
+        const results = { pose: [], depth: [], canny: [], normal: [], shaded: [] };
 
         // Determine current visibility intent
         const visSkel = this.container.querySelector("#chk-skel").checked;
         const toggleHelpers = (vis) => {
             if(this.gridHelper) this.gridHelper.visible = vis;
             if(this.axesHelper) this.axesHelper.visible = vis;
+            if(this.floor) this.floor.visible = vis;
         };
         toggleHelpers(false);
 
         const setVisibility = (mode) => {
             const showPose = mode === 'pose';
-            const showDepth = mode === 'depth' || mode === 'canny' || mode === 'normal';
+            const showDepth = mode === 'depth' || mode === 'canny' || mode === 'normal' || mode === 'shaded';
             this.characters.forEach(c => {
                 c.poseMeshes.forEach(m => m.visible = showPose);
                 c.inactiveDepthMeshes.forEach(m => m.visible = false); // Force inactive meshes to stay hidden
@@ -1081,26 +1579,6 @@ class YedpViewport {
                 // Force hide skeleton helper during all bake passes so it never contaminates the OpenPose result
                 c.skeletonHelper.visible = false; 
             });
-        };
-
-        const swapPoseToUnlit = () => {
-            const originalMats = new Map();
-            this.characters.forEach(c => {
-                c.poseMeshes.forEach(child => {
-                    if (child.isMesh && child.material) {
-                        originalMats.set(child, child.material);
-                        const oldColor = child.material.color || new THREE.Color(0xffffff);
-                        const newMat = new THREE.MeshBasicMaterial({ color: oldColor, skinning: true });
-                        if (child.material.map) { newMat.map = child.material.map; newMat.color.setHex(0xffffff); }
-                        child.material = newMat;
-                    }
-                });
-            });
-            return () => {
-                this.characters.forEach(c => {
-                    c.poseMeshes.forEach(child => { if (originalMats.has(child)) child.material = originalMats.get(child); });
-                });
-            };
         };
 
         const compressCanvas = document.createElement("canvas");
@@ -1121,12 +1599,13 @@ class YedpViewport {
         };
 
         // RENDER LOOP
-        for (let i = 0; i < frames; i++) {
-            const time = i * step;
-            const timeRatio = frames > 1 ? i / (frames - 1) : 0;
+        for (let idx = 0; idx < framesToRender; idx++) {
+            const actualFrame = isSingleFrame ? currentUIFrame : idx;
+            const time = actualFrame * step;
+            const timeRatio = totalNodeFrames > 1 ? actualFrame / (totalNodeFrames - 1) : 0;
             
             // UI Progress Feedback
-            btn.innerText = `BAKING ${i+1}/${frames}`;
+            btn.innerText = `BAKING ${idx+1}/${framesToRender}`;
             
             this.applyCameraKeyframes(timeRatio);
 
@@ -1142,9 +1621,7 @@ class YedpViewport {
             this.scene.background = new THREE.Color(0x000000); 
             setVisibility('pose');
             this.resetCamera(); 
-            const restoreMaterials = swapPoseToUnlit(); 
             captureFrame(results.pose, "image/png"); 
-            restoreMaterials(); 
 
             // PASS 2: DEPTH
             this.scene.background = new THREE.Color(0x000000);
@@ -1182,12 +1659,33 @@ class YedpViewport {
             captureFrame(results.normal, "image/png");
             normalRestores.forEach(o => o.mesh.material = o.mat);
             
+            // PASS 5: SHADED
+            this.scene.background = new THREE.Color(0x000000); 
+            setVisibility('shaded'); 
+            this.resetCamera();
+            const shadedRestores = [];
+            this.characters.forEach(c => {
+                c.activeDepthMeshes.forEach(m => { shadedRestores.push({mesh: m, mat: m.material}); m.material = this.shadedMat; });
+            });
+            captureFrame(results.shaded, "image/png");
+            shadedRestores.forEach(o => o.mesh.material = o.mat);
+
             await new Promise(r => setTimeout(r, 10)); // tiny yield
         }
         
         // Restoration
         this.renderer.setSize(originalSize.width, originalSize.height);
-        this.camera.aspect = originalAspect;
+        
+        if (this.perspCam) this.perspCam.aspect = originalAspect;
+        if (this.orthoCam) {
+            const aspectTarget = originalSize.width / originalSize.height;
+            const frustumSize = 4.0;
+            this.orthoCam.left = -frustumSize * aspectTarget / 2;
+            this.orthoCam.right = frustumSize * aspectTarget / 2;
+            this.orthoCam.top = frustumSize / 2;
+            this.orthoCam.bottom = -frustumSize / 2;
+        }
+        
         this.camera.zoom = originalZoom; 
         
         if(this.isDepthMode) { this.camera.near = this.userNear; this.camera.far = this.userFar; } 
@@ -1198,9 +1696,12 @@ class YedpViewport {
         this.scene.background = originalBg;
         this.isBaking = false;
         
+        // Restore helpers and selected state
+        this.lights.forEach(l => l.helper.visible = l.type !== 'ambient');
+        if (this.selected.obj) this.selectObject(this.selected.obj, this.selected.type, this.selected.id);
+        
         // Restore standard view
-        const chkDepth = this.container.querySelector("#chk-depth").checked;
-        this.toggleDepthMode(chkDepth);
+        this.updateVisibilities();
         this.characters.forEach(c => { c.skeletonHelper.visible = visSkel; });
         
         // ---- CRITICAL NEW UPLOAD LOGIC TO PREVENT QUOTA CRASHES ----
@@ -1228,7 +1729,7 @@ class YedpViewport {
         }
         
         btn.innerText = "BAKE (DONE)";
-        setTimeout(() => { btn.innerText = "BAKE V9.10"; }, 2000);
+        setTimeout(() => { btn.innerText = originalBtnText; }, 2000);
     }
 }
 
