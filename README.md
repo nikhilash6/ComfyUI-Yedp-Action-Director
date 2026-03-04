@@ -1,91 +1,97 @@
 # **🎬 ComfyUI Yedp Action Director**
 
 
-https://github.com/user-attachments/assets/0ee6fd2f-4167-48a9-ba3f-bd0a10c82ffc
+https://github.com/user-attachments/assets/bb543f35-2efe-49a9-b51a-093986ddd25e
 
 
-**A powerful 3D viewport node for ComfyUI to direct, preview, and batch-render 3D character animations for ControlNet workflows.**
+**A powerful 3D viewport node for ComfyUI to direct, preview, and batch-render 3D character animations, environments, and custom cameras for ControlNet workflows.**
 
 
 ## **🌟 Overview**
 
-**Yedp Action Director** is a custom node for ComfyUI that integrates a fully interactive 3D viewport directly into your workflow. It allows you to dynamically load up to 16 characters, assign independent MoCap animations (.fbx, .bvh, .glb), compose them in 3D space using Gizmos, animate camera movements, and bake pixel-perfect **OpenPose, Depth, Canny, and Normal** passes directly into your ControlNet pipelines.
+**Yedp Action Director** is a custom node for ComfyUI that integrates a fully interactive 3D viewport directly into your workflow. It allows you to dynamically load up to 16 characters, assign independent MoCap animations, import full 3D environments and baked physics, compose them in 3D space, animate or override camera movements, and bake pixel-perfect **OpenPose, Depth, Canny, Normal, Shaded, and Alpha** passes directly into your ControlNet pipelines.
 
 ## **✨ Key Features**
 
-* **Interactive 3D Viewport:** Fully resizable, orbit controls, and real-time playback.  
-* **Multi-Pass Rendering:** Generates 4 distinct batches in one go:  
+* **Interactive 3D Viewport:** Fully resizable, click-to-select raycasting, orbit controls, and real-time playback scrubbing.  
+* **Multi-Pass Rendering:** Generates 6 distinct batches in one go:  
   * **🔴 Pose:** Unlit flat colors for OpenPose.  
   * **⚫ Depth:** High-quality depth maps with **Manual Near/Far** controls.  
   * **⚪ Canny:** Procedural Rim-Light (Matcap) for perfect edge detection.  
   * **🔵 Normal:** Standard RGB normal maps for geometry detail.  
-* **Format Support:** Supports standard .fbx and .glb animation files.  
-* **Smart Retargeting:** Auto-detects and normalizes bone names (Mixamo-compatible).  
-* **Infinite Scaling:** The node UI scales vertically and horizontally without limits.
+  * **🟠 Shaded:** Clay-style renders for spatial and lighting reference.  
+  * **🏁 Alpha:** Pure black and white character/prop matte masks for compositing.  
+* **Format Support:** Supports standard .fbx and .glb animation and environment files.  
+* **Smart Retargeting:** Auto-detects and normalizes bone names (Mixamo & HY-MOTION compatible).  
+* **Workflow Serialization:** Your entire 3D scene setup (positions, loops, cameras) is saved directly inside your ComfyUI workflow.
 
-## **🚀 What's New in V9**
+## **🚀 What's New in V9.20 (The Environment & Pipeline Update)**
 
-The entire architecture has been rebuilt from the ground up for maximum performance and multi-character direction:
+This major update transforms Action Director from a character-posing tool into a full 3D scene compositor, bridging the gap between ComfyUI and professional DCCs like Maya and Blender.
 
-* **Multi-Character Support:** Dynamically add, select, and delete up to 16 characters in the same scene.  
-* **3D Gizmo Tools:** Translate, Rotate, and Scale individual characters perfectly into your scene.  
-* **Male / Female Quick Toggle:** Instantly swap between Male and Female body meshes on the fly per character.  
-* **Props Support:** Attach hats, swords, or items to your rig; they will automatically render in the Depth/Normal/Canny passes\!  
-* **Camera Sequencing:** Set dynamic camera movements (Start/End keyframes) with custom easing (Linear, Ease-In, Ease-Out).  
-* **Python Memory Cache Bypass:** Completely eliminated browser QuotaExceededError crashes. Massive multi-frame renders now upload directly to Python RAM without freezing your UI\!  
+### **🌍 Environments & Baked Physics**
+
+* **Environment Imports:** Load full .fbx and .glb scene meshes (buildings, streets, static props) from the new input/yedp\_envs folder. Environments properly cast and receive shadows.  
+* **Animated Environments:** Standard object animations (like a moving car, sliding doors, or rotating fans keyframed in Maya/Blender) are fully supported. Simply check the "Loop (Anim)" box\!  
+* **Alembic-Style Physics (Blend Shapes):** The engine natively reads GLTF Morph Targets and Shape Key animations\! Run cloth, soft-body, or wind simulations in Maya/Blender, bake them to Shape Keys, and import them directly into the environment tab for real-time physics\!  
+* **FBX Opacity Auto-Fix:** Automatically patches a common Maya/Blender export bug where FBX materials import completely invisible.
+
+### **🎥 Advanced Camera Pipeline**
+
+* **Animated Camera Imports:** You can now import .fbx and .glb animated camera tracks directly from your 3D software\!  
+* **Camera Override System:** Check "Override" to lock the viewport and perfectly trace your imported camera path in real-time.  
+* **Maya / 3D Coordinate Fixer:** Built-in "FBX Import Fix" panel allows you to adjust local Rotation Pivot (Rx, Ry, Rz) and Distance Scale directly on the camera. Easily fixes the classic "Z-Up to Y-Up" axis swap and Centimeter-to-Meter scale issues.  
+* **Ghost Camera Visualizer:** A cyan wireframe proxy camera appears in the scene so you can visually align and scale your Maya camera before engaging the override.  
+* **Dedicated Camera Folder:** Camera animations are cleanly isolated in their own input/yedp\_cams folder.
+
+### **✨ Massive UX & UI Overhaul**
+
+* **Dynamic Folder Refresh:** Click the live refresh button after dropping new .fbx or .glb files into your input folders to load them instantly, without reloading the web page\!  
+* **"Click-to-Select" Raycasting:** Click on any Character, Environment, or Light directly in the 3D viewport or anywhere on its UI card to instantly attach the Transform Gizmo.  
+* **"Panic" Reset Button:** If you ever get lost in 3D space or stuck inside a bad imported camera, click RESET to instantly teleport your view back to the safe default origin.  
+* **Live Scrubbing Engine:** Scrubbing the timeline now updates all bones, physics, and camera matrices flawlessly frame-by-frame, even while paused.
 
 ## **📥 Installation**
 
 1. **Clone the repository** into your ComfyUI custom nodes directory:  
    cd ComfyUI/custom\_nodes/  
-   git clone https://github.com/YourUsername/ComfyUI-Yedp-Action-Director.git
-
-2. **Install Dependencies:**  
-   No external Python dependencies are required beyond standard ComfyUI requirements. The frontend libraries (Three.js) are loaded dynamically.  
-3. **Add Animations:**  
-   * Create a folder named yedp\_anims inside your ComfyUI input directory.  
-   * Place your .fbx or .glb character animations there.  
-   * *Path:* ComfyUI/input/yedp\_anims/  
+   git clone https://github.com/YourUsername/ComfyUI-Yedp-Action-Director.git  
+2. **Install Dependencies:** No external Python dependencies are required beyond standard ComfyUI requirements. The frontend libraries (Three.js) are loaded dynamically.  
+3. **Add Animations & Assets:** Create the following folders inside your ComfyUI input directory and place your .fbx or .glb files accordingly:  
+   * **Characters:** ComfyUI/input/yedp\_anims/  
+   * **Environments/Physics:** ComfyUI/input/yedp\_envs/  
+   * **Cameras:** ComfyUI/input/yedp\_cams/  
 4. **Restart ComfyUI.**
 
 ## **🛠️ Usage**
 
 ### **1\. Getting Started**
 
-1. **Add the Node:** Right-click \> Yedp \> MoCap \> Yedp Action Director.  
-2. **Adjust Settings:**  
-   * **Width/Height:** Set the output resolution (e.g., 512x512).  
-   * **Frame Count:** Number of frames to render.  
-   * **FPS:** Framerate of the animation.  
-4. **Depth Control:**  
-   * Check Depth in the viewport header to preview the depth pass.  
-   * Adjust **N (Near)** and **F (Far)** values to set the white/black points for maximum contrast.
-     
-### **2\. Character Management**
+* **Add the Node:** Right-click \> Yedp \> MoCap \> Yedp Action Director.  
+* **Adjust Settings:** Set your Output width & height, total frame\_count, and fps.  
+* **Viewport Toggles:** Use the top checkboxes to preview your scene in Shaded, Depth, or Skel (Skeleton) modes. Adjust the Depth Near/Far inputs to maximize contrast.
 
-* Click **\+ Add Char** to spawn a new character into the scene.  
-* Select a character from the list and use the **Gizmo Tools** (Move, Rotate, Scale) to place them in the 3D viewport (MAKE SURE TO PRESS THE "DESELECT" ONCE YOU ARE DONE).  
-* Assign an animation from the dropdown (automatically reads from your input/yedp_anims folder).  
-* Toggle the **Loop** checkbox. The duration of the specific animation is displayed in frames (e.g., 52f).
+### **2\. Scene Assembly (Characters & Environments)**
+
+* Click **\+ Add Char** or **\+ Add Env** to spawn elements into the scene.  
+* **Selection:** Click directly on the object in the 3D viewport, or click its card in the sidebar.  
+* **Transform:** Use the floating Gizmo icons (or hotkeys G, R, S) to Move, Rotate, and Scale your objects. Click the X icon or click empty space to deselect.  
+* **Animation:** Assign an animation from the dropdown. Toggle the **Loop** checkbox for continuous playback.
 
 ### **3\. The M/F (Gender) Toggle**
 
-Next to the Loop checkbox is a toggle button indicating **M** (Male) or **F** (Female). Clicking this instantly swaps the underlying depth mesh of the character, allowing you to direct scenes with mixed genders using the exact same underlying skeletal animation\!
+Next to the Character Loop checkbox is a toggle button indicating **M** (Male) or **F** (Female). Clicking this instantly swaps the underlying depth mesh of the character, allowing you to direct scenes with mixed genders using the exact same skeletal animation\!
 
-### **4\. Camera Sequence**
+### **4\. Camera Direction**
 
-You can animate the camera to create panning or zooming shots:
+You have two ways to animate your camera:
 
-1. Move your 3D viewport camera to the desired starting position. Click **Set Start**.  
-2. Move your camera to the desired ending position. Click **Set End**.  
-3. Choose your interpolation (e.g., easeOut).  
-4. When you hit **Play** or scrub the timeline, the camera will smoothly animate between these two points over the duration of your total frames\!
+* **Internal Keyframing:** Move your viewport camera to a start position and click **Set Start**. Move to an end position and click **Set End**. Choose your interpolation (e.g., easeOut). The camera will smoothly animate between the two points\!  
+* **Maya/Blender Override:** Import an FBX camera from the yedp\_cams folder. Adjust the scale/rotation fixes if your 3D software uses different axes, verify it with the cyan ghost proxy, and then check **Override** to lock your viewport to the imported track.
 
 ### **5\. Baking**
 
-Adjust your global **frame_count** and **fps** in the node properties.
-
-Click the **BAKE** button in the viewport header. The engine will rapidly generate 4 separate visual passes and output them as image batches directly into your ComfyUI workflow.
+Click the **BAKE V9.20** button in the viewport header (or BAKE FRAME for a single test frame). The engine will rapidly generate 6 separate visual passes, temporarily cache them to avoid browser crashes, and output them as image batches directly into your ComfyUI workflow.
 
 ## **🛠️ Custom Rigging & Prop Setup (For Advanced Users)**
 
@@ -104,17 +110,16 @@ If you want to modify Yedp_Rig.glb in Blender to add your own meshes or props, t
 | **DEPTH\_BATCH** | Grayscale distance map (White=Near, Black=Far). | **ControlNet Depth**. Excellent for preserving volumetric shape. |
 | **CANNY\_BATCH** | Black mesh with white illuminated edges (Rim Light). | **ControlNet Canny/Lineart**. Captures silhouette and internal details. |
 | **NORMAL\_BATCH** | RGB Normal map relative to the camera. | **ControlNet NormalMap**. Great for surface detail and lighting. |
+| **SHADED\_BATCH** | Standard 3D clay render with active lighting. | General scene preview or image-to-image styling references. |
+| **ALPHA\_BATCH** | Pure white characters/props on black background. | **Masking/Compositing**. Easily separate subjects from environments. |
+
 
 ## **🐛 Troubleshooting**
 
-* **"animation not playing":**  
-  * the node has been built to play animations from mixamo, the rig needs to follow a similar prefix structure and a few known synonyms such as "Pelvis" for "Hips" (things such as mixamo:Hips/(prefix)_Hips should be recognized fine). Support for HY-MOTION rig name convention has also been added recently.
-* **"Viewport is invisible on load":**  
-  * *Solution:* Depending on your browser zoom, the viewport might initialize at size 0\. Simply **resize the node slightly** by dragging the bottom-right corner, and the viewport will snap into place.  
-* **"Animation not found":**  
-  * Ensure your files are in ComfyUI/input/yedp\_anims/. Refresh your browser if you just added them.
-* **"slow downs":**  
-  * the node as been tested on Chrome browser, potential issues might occur on other browsers.
+* **"Animation not playing":** \* The node has been built to play animations from Mixamo. The rig needs to follow a similar prefix structure and a few known synonyms such as "Pelvis" for "Hips". Support for HY-MOTION rig naming conventions is also included.  
+* **"Viewport is invisible on load":** \* *Solution:* Depending on your browser zoom, the viewport might initialize at size 0\. Simply **resize the node slightly** by dragging the bottom-right corner, and the viewport will snap into place.  
+* **"Animation/Environment not found":** \* Ensure your files are in the correct input/ subfolders. Click your custom **Refresh** button in the ComfyUI menu if you just added them\!  
+* **"Slow downs":** \* The node has been optimized for the Chrome browser; potential issues or memory caps might occur on other browsers.
 
 ## **📜 License**
 
