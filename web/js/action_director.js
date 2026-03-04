@@ -1,39 +1,14 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-/** * YEDP ACTION DIRECTOR - V9.18 (Full Scene Control)
- * - Added: Support for up to 4 characters in the same scene.
- * - Added: TransformControls for moving and rotating characters individually.
- * - Added: Sidebar UI for independent character animation selection and looping.
- * - Added: Camera Keyframing (Start/End) with linear & ease interpolations.
- * - Updated: Optimized BVH offsets and clone instancing using SkeletonUtils.
- * - Fix (9.1): Resolved resolution gate collapse (blue line) and WebGL baking crash caused by null dimensions.
- * - Fix (9.1): Applied modulo time wrapping to ensure characters correctly loop when global frame count exceeds their animation duration.
- * - Fix (9.2): Eradicated QuotaExceededError and UI stutter by uploading payload to Python memory cache.
- * - Update (9.2): Removed strict character limitation (capped at 16 for WebGL safety).
- * - Update (9.2): Added progress indicator to Bake button.
- * - Update (9.3): Added dynamic Male/Female Mesh Toggle matching 'Geo_Depth_F' vs 'Geo_Depth' conventions.
- * - Update (9.4): Added Scale mode to Gizmo Tools for resizing individual characters.
- * - Fix (9.5): Unrecognized meshes (props) automatically attach to both genders' depth passes for future prop support.
- * - Fix (9.6): Made Mesh naming parser completely immune to GLTF exporter renaming.
- * - Fix (9.7): Implemented Full Ancestry String Parsing to solve Blender's "Object vs Mesh Data" naming conflict. 
- * - Update (9.7): Added tiny Mesh Counter [M:1 | F:1 | Pose:1] to UI for immediate parsing feedback.
- * - Fix (9.8): Added timestamp Cache-Buster to Rig/Animation loaders to prevent browser from loading stale GLB files.
- * - Update (9.8): Added verbose console logging for mesh categorization transparency.
- * - Fix (9.9): Removed destructive position overrides to restore full Root Motion.
- * - Fix (9.9): Decoupled internal engine time from integer UI slider to fix playback freezing.
- * - Update (9.10): Upgraded all rendering passes (Depth, Canny, Normal) to 100% lossless pure PNG.
- * - Fix (Camera): Added OrbitControls target to keyframes to fix panning and zooming translation issues.
- * - Update (Offline): Pointed all imports to the same local directory.
- * - Fix (9.11): Ensured "none" is always available in animation lists to fix UI mismatches.
- * - Fix (9.11): Forcefully hide the skeleton during all baking passes to prevent OpenPose contamination.
- * - Update (9.12): Overhauled UI with floating Gizmo icons, Blender shortcuts, collapsible right menus.
- * - Update (9.13): Added Orthographic vs Perspective camera toggles, FOV slider, Viewport View Cube, and color-coded UI categories.
- * - Update (9.14): Added Shaded toggle (Clay mode), Transform Panel (Pos/Rot/Scale X,Y,Z), Lighting Category (Ambient, Dir, Point, Spot + Shadows), and Single Frame Bake.
- * - Update (9.15): Converted OpenPose meshes to BasicMaterial for unlit accurate preview, fixed Shaded mode to correctly display depth geometry, added Shaded output pass.
- * - Update (9.16): Fixed camera target offset when rotating via Transform UI. Added live sync between viewport and text inputs. Fixed FOV UI layout.
- * - Update (9.17): Upgraded light helpers to distinct visual icons (Arrows, Cones, Circles) and made Shaded/Depth toggles mutually exclusive.
- * - Fix (9.18): Fixed spotlight helper cone orientation to properly point and open along the light's direction.
+/** * YEDP ACTION DIRECTOR - V9.21 (Auto-Save & Hot-Reload Update)
+ * - Added: ComfyUI Native Serialization. The entire 3D scene state (Camera, Keyframes, Chars, Envs, Lights, Settings) 
+ * is now automatically saved into the ComfyUI workflow .json file.
+ * - Added: "SYNC FOLDERS" button to dynamically hot-reload newly added files into dropdowns without reloading the browser.
+ * - Added: Environments Support. Load GLTF/FBX props and scenes from `yedp_envs`.
+ * - Added: Alembic-Style Physics Support via GLTF Morph Targets and Skeletal Animations natively supported in Environments.
+ * - Added: Black and White Alpha Mask generation pass.
+ * - Added: Custom Animated Camera import override (FBX/GLB support) from `yedp_cams`.
  */
 
 const loadThreeJS = async () => {
@@ -42,10 +17,19 @@ const loadThreeJS = async () => {
     return window._YEDP_THREE_CACHE = new Promise(async (resolve, reject) => {
         const baseUrl = new URL(".", import.meta.url).href;
         try {
-            console.log("[Yedp] Initializing Engine V9.18 (Offline Mode)...");
+            console.log("[Yedp] Initializing Engine V9.21 (Offline Mode)...");
             
-            // Loaded locally from the same folder
             const THREE = await import(new URL("./three.module.js", baseUrl).href);
+
+            if (THREE.ColorManagement && typeof THREE.ColorManagement.colorSpaceToWorking !== 'function') {
+                THREE.ColorManagement.colorSpaceToWorking = function (color, colorSpace) {
+                    if (colorSpace === THREE.SRGBColorSpace || colorSpace === 'srgb') return color.convertSRGBToLinear();
+                    return color;
+                };
+            } else if (!THREE.ColorManagement) {
+                THREE.ColorManagement = { enabled: false, colorSpaceToWorking: function (color) { return color; } };
+            }
+
             const { OrbitControls } = await import(new URL("./OrbitControls.js", baseUrl).href);
             const { TransformControls } = await import(new URL("./TransformControls.js", baseUrl).href);
             const { GLTFLoader } = await import(new URL("./GLTFLoader.js", baseUrl).href);
@@ -62,7 +46,6 @@ const loadThreeJS = async () => {
     });
 };
 
-// --- UNIVERSAL BONE MAPPING DICTIONARY ---
 const { BONE_MAP, BONE_KEYS_SORTED } = (() => {
     const map = {};
     const synonyms = {
@@ -148,17 +131,17 @@ const semanticNormalize = (name) => {
     return clean;
 };
 
-// Extracted Character Class
+// --- CLASSES ---
 class CharacterInstance {
     constructor(id, baseRig, THREE) {
         this.id = id;
         this.scene = window._YEDP_SKEL_UTILS.clone(baseRig);
         this.mixer = new THREE.AnimationMixer(this.scene);
         this.action = null;
-        this.duration = 0; // in seconds
+        this.duration = 0; 
         this.loop = true;
-        this.gender = 'M'; // Default
-        this.hasFemaleMesh = false; // Track if a female mesh was successfully parsed
+        this.gender = 'M'; 
+        this.hasFemaleMesh = false; 
 
         this.poseMeshes = [];
         this.depthMeshesM = [];
@@ -168,17 +151,15 @@ class CharacterInstance {
         this.skeletonHelper.visible = true;
         this.animFile = "none";
 
-        // Spread them out slightly upon spawn
         this.scene.position.set((id - 1) * 1.0, 0, 0);
 
         this.scene.traverse((child) => {
-            if(child.isMesh) {
+            if(child.isMesh || child.isSkinnedMesh) {
                 child.visible = true; 
                 child.frustumCulled = false; 
                 child.castShadow = true;
                 child.receiveShadow = true;
                 
-                // V9.7 FIX: Ancestry String Builder
                 let fullPath = "";
                 let curr = child;
                 while (curr && curr !== this.scene && curr !== null) {
@@ -186,28 +167,21 @@ class CharacterInstance {
                     curr = curr.parent;
                 }
 
-                // Strip spaces and underscores, leaving pipes for node boundaries
                 const n = fullPath.replace(/[\s_]/g, '');
                 let category = "";
 
                 if (n.includes("openpose") || n.includes("pose")) {
                     this.poseMeshes.push(child);
                     category = "Pose";
-                    
-                    // Force OpenPose to be completely immune to lighting (MeshBasicMaterial)
                     if (child.material) {
                         const processMat = (mat) => {
                             const oldColor = mat.color || new THREE.Color(0xffffff);
-                            const newMat = new THREE.MeshBasicMaterial({ color: oldColor, skinning: true });
+                            const newMat = new THREE.MeshBasicMaterial({ color: oldColor });
                             if (mat.map) { newMat.map = mat.map; newMat.color.setHex(0xffffff); }
                             return newMat;
                         };
-                        
-                        if (Array.isArray(child.material)) {
-                            child.material = child.material.map(processMat);
-                        } else {
-                            child.material = processMat(child.material);
-                        }
+                        if (Array.isArray(child.material)) child.material = child.material.map(processMat);
+                        else child.material = processMat(child.material);
                     }
 
                 } else if (n.includes("depthf") || n.includes("female") || n.includes("woman") || n.includes("|f|") || n.endsWith("f|")) {
@@ -220,27 +194,17 @@ class CharacterInstance {
                     child.visible = false; 
                     category = "Male Depth";
                 } else {
-                    // Prop Fallback: Any unclassified mesh (like a sword/hat) gets added to BOTH genders automatically
                     this.depthMeshesM.push(child);
                     this.depthMeshesF.push(child);
                     child.visible = false;
                     category = "Prop (Fallback)";
                 }
-                
-                if(this.id === 1) {
-                    console.log(`[Yedp] Parsed Mesh: "${child.name}" -> categorized as [${category}]`);
-                }
             }
         });
     }
 
-    get activeDepthMeshes() {
-        return (this.gender === 'F' && this.hasFemaleMesh) ? this.depthMeshesF : this.depthMeshesM;
-    }
-
-    get inactiveDepthMeshes() {
-        return (this.gender === 'F' && this.hasFemaleMesh) ? this.depthMeshesM : this.depthMeshesF;
-    }
+    get activeDepthMeshes() { return (this.gender === 'F' && this.hasFemaleMesh) ? this.depthMeshesF : this.depthMeshesM; }
+    get inactiveDepthMeshes() { return (this.gender === 'F' && this.hasFemaleMesh) ? this.depthMeshesM : this.depthMeshesF; }
 
     destroy(scene) {
         scene.remove(this.scene);
@@ -249,12 +213,34 @@ class CharacterInstance {
     }
 }
 
+class EnvironmentInstance {
+    constructor(id, THREE) {
+        this.id = id;
+        this.THREE = THREE;
+        this.group = new THREE.Group();
+        this.mixer = new THREE.AnimationMixer(this.group);
+        this.action = null;
+        this.duration = 0;
+        this.loop = true;
+        this.envFile = "none";
+        this.meshes = [];
+    }
+
+    destroy(scene) {
+        scene.remove(this.group);
+        this.mixer.stopAllAction();
+    }
+}
+
+// --- MAIN VIEWPORT ---
 class YedpViewport {
     constructor(node, container) {
         this.node = node;
         this.container = container;
         this.baseUrl = new URL(".", import.meta.url).href;
         
+        this.isInitialized = false;
+
         this.scene = null;
         this.camera = null;
         this.perspCam = null;
@@ -270,28 +256,34 @@ class YedpViewport {
         
         this.characters = []; 
         this.charCounter = 0;
+        
+        this.environments = [];
+        this.envCounter = 0;
 
         this.lights = [];
         this.lightCounter = 0;
 
-        // Unified Selection System
-        this.selected = { obj: null, type: null, id: null }; // type: 'character', 'light', 'camera'
+        this.selected = { obj: null, type: null, id: null };
 
         this.gridHelper = null;
         this.axesHelper = null;
         this.semanticMap = new Map(); 
 
-        // Camera Keys
         this.camKeys = { start: null, end: null, ease: 'linear' };
+        this.cameraAnimGroup = null;
+        this.cameraMixer = null;
+        this.cameraAction = null;
+        this.cameraAnimNode = null;
+        this.importedCamProxy = null; 
+        this.isCameraOverride = false;
         
-        // Materials
-        this.shadedMat = null; // Clay material
-        this.depthMat = null;
-        this.cannyMat = null; 
-        this.normalMat = null; 
+        this.camOverrideOffset = { rx: 0, ry: 0, rz: 0 };
+        this.camOverrideScale = 1.0;
+        
+        this.matsSkinned = null;
+        this.matsStatic = null;
         this.originalMaterials = new Map();
         
-        // Control States
         this.isShadedMode = false;
         this.isDepthMode = false;
         this.userNear = 0.1;
@@ -306,10 +298,12 @@ class YedpViewport {
         this.renderWidth = 512;
         this.renderHeight = 512;
         this.availableAnimations = ["none"];
+        this.availableEnvs = ["none"];
+        this.availableCams = ["none"];
 
-        // UI references
         this.uiSidebar = null;
         this.uiCharList = null;
+        this.uiEnvList = null;
         this.uiLightList = null;
         this.uiTransformInputs = {};
 
@@ -331,22 +325,28 @@ class YedpViewport {
             this.BVHLoader = libs.BVHLoader;
             window._YEDP_SKEL_UTILS = libs.SkeletonUtils;
 
-            this.shadedMat = new this.THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.6, metalness: 0.1, skinning: true });
-            this.depthMat = new this.THREE.MeshDepthMaterial({ depthPacking: this.THREE.BasicDepthPacking, skinning: true });
-            this.cannyMat = new this.THREE.MeshMatcapMaterial({ matcap: this.createRimTexture(), skinning: true });
-            this.normalMat = new this.THREE.MeshNormalMaterial({ skinning: true });
+            const createMats = () => ({
+                shaded: new this.THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.6, metalness: 0.1 }),
+                depth: new this.THREE.MeshDepthMaterial({ depthPacking: this.THREE.BasicDepthPacking }),
+                canny: new this.THREE.MeshMatcapMaterial({ matcap: this.createRimTexture() }),
+                normal: new this.THREE.MeshNormalMaterial(),
+                alpha: new this.THREE.MeshBasicMaterial({ color: 0xffffff })
+            });
+            this.matsSkinned = createMats();
+            this.matsStatic = createMats();
 
             // --- LAYOUT ---
             this.container.innerHTML = "";
             Object.assign(this.container.style, {
                 display: "flex", flexDirection: "row", background: "#111",
                 width: "100%", height: "100%", overflow: "hidden",
-                border: "1px solid #333", borderRadius: "4px"
+                border: "1px solid #333", borderRadius: "4px",
+                boxSizing: "border-box"
             });
 
             // MAIN VIEW AREA
             const mainCol = document.createElement("div");
-            Object.assign(mainCol.style, { display: "flex", flexDirection: "column", flex: "1", minWidth: 0 });
+            Object.assign(mainCol.style, { display: "flex", flexDirection: "column", flex: "1", minWidth: 0, overflow: "hidden" });
             this.container.appendChild(mainCol);
 
             // SIDEBAR
@@ -358,11 +358,12 @@ class YedpViewport {
             });
             this.container.appendChild(this.uiSidebar);
 
-            // INSIDE MAIN COL: Header, Viewport, Timeline
+            // INSIDE MAIN COL
             const headerDiv = document.createElement("div");
             Object.assign(headerDiv.style, {
                 height: "36px", flex: "0 0 36px", background: "#222", borderBottom: "1px solid #333",
-                display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 8px"
+                display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 8px",
+                boxSizing: "border-box" 
             });
             mainCol.appendChild(headerDiv);
 
@@ -374,7 +375,8 @@ class YedpViewport {
             const timelineDiv = document.createElement("div");
             Object.assign(timelineDiv.style, {
                 height: "30px", flex: "0 0 30px", background: "#1a1a1a", borderTop: "1px solid #333",
-                display: "flex", alignItems: "center", padding: "0 8px", gap: "8px"
+                display: "flex", alignItems: "center", padding: "0 8px", gap: "8px",
+                boxSizing: "border-box" 
             });
             mainCol.appendChild(timelineDiv);
 
@@ -388,7 +390,6 @@ class YedpViewport {
             this.axesHelper = new this.THREE.AxesHelper(1);
             this.scene.add(this.axesHelper);
 
-            // Invisible Floor for receiving shadows
             const floorGeo = new this.THREE.PlaneGeometry(50, 50);
             const floorMat = new this.THREE.ShadowMaterial({ opacity: 0.6 });
             this.floor = new this.THREE.Mesh(floorGeo, floorMat);
@@ -396,23 +397,38 @@ class YedpViewport {
             this.floor.receiveShadow = true;
             this.scene.add(this.floor);
 
-            // Setup Cameras (Dual Setup)
+            // Setup Cameras
             const aspect = this.renderWidth / this.renderHeight || 1;
             this.perspCam = new this.THREE.PerspectiveCamera(45, aspect, 0.01, 2000);
             this.perspCam.position.set(0, 1.2, 4);
 
-            const d = 2.0; // Base Frustum size
+            const d = 2.0; 
             this.orthoCam = new this.THREE.OrthographicCamera(-d * aspect, d * aspect, d, -d, 0.01, 2000);
             this.orthoCam.position.set(0, 1.2, 4);
 
             this.camera = this.perspCam;
             this.isOrthographic = false;
             
+            this.cameraAnimGroup = new this.THREE.Group();
+            this.cameraAnimGroup.visible = false;
+            this.scene.add(this.cameraAnimGroup);
+
+            this.importedCamProxy = new this.THREE.Group();
+            const boxG = new this.THREE.BoxGeometry(0.2, 0.2, 0.4);
+            const boxM = new this.THREE.MeshBasicMaterial({ color: 0x00d2ff, wireframe: true });
+            const pBox = new this.THREE.Mesh(boxG, boxM);
+            const coneG = new this.THREE.ConeGeometry(0.3, 0.5, 4);
+            const coneM = new this.THREE.MeshBasicMaterial({ color: 0x00d2ff, wireframe: true });
+            const pCone = new this.THREE.Mesh(coneG, coneM);
+            pCone.rotation.x = -Math.PI / 2; pCone.rotation.y = Math.PI / 4; pCone.position.z = -0.4;
+            this.importedCamProxy.add(pBox); this.importedCamProxy.add(pCone);
+            this.scene.add(this.importedCamProxy);
+            this.importedCamProxy.visible = false;
+            
             this.renderer = new this.THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
             if (this.renderer.outputColorSpace) this.renderer.outputColorSpace = this.THREE.SRGBColorSpace;
             else this.renderer.outputEncoding = this.THREE.sRGBEncoding;
             
-            // Enable Shadows
             this.renderer.shadowMap.enabled = true;
             this.renderer.shadowMap.type = this.THREE.PCFSoftShadowMap;
 
@@ -433,7 +449,6 @@ class YedpViewport {
             this.controls.target.set(0, 1, 0);
             this.controls.enableDamping = true;
             
-            // Link OrbitControls to UI Text Inputs to sync on drag
             this.controls.addEventListener('change', () => {
                 if (this.selected && this.selected.type === 'camera' && this.uiTransformInputs) {
                     const isTyping = Object.values(this.uiTransformInputs).some(inp => inp === document.activeElement);
@@ -443,12 +458,72 @@ class YedpViewport {
 
             this.transformControls = new this.TransformControls(this.camera, this.renderer.domElement);
             this.transformControls.addEventListener('dragging-changed', (event) => {
-                this.controls.enabled = !event.value;
+                this.controls.enabled = !event.value && !this.isCameraOverride;
             });
             this.transformControls.addEventListener('change', () => {
                 this.updateTransformUIFromObject();
             });
             this.scene.add(this.transformControls);
+
+            this.raycaster = new this.THREE.Raycaster();
+            this.mouse = new this.THREE.Vector2();
+            this.pointerDownPos = new this.THREE.Vector2();
+
+            viewportDiv.addEventListener('pointerdown', (e) => {
+                this.pointerDownPos.set(e.clientX, e.clientY);
+            });
+
+            viewportDiv.addEventListener('pointerup', (e) => {
+                if (e.target !== this.renderer.domElement) return;
+                if (this.transformControls.dragging || this.transformControls.axis) return;
+                
+                const dist = Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y);
+                if (dist > 5) return;
+
+                const rect = viewportDiv.getBoundingClientRect();
+                this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+                this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+                this.raycaster.setFromCamera(this.mouse, this.camera);
+
+                const interactables = [];
+                const objMap = new Map();
+
+                this.characters.forEach(c => {
+                    if (c.scene.visible) {
+                        interactables.push(c.scene);
+                        c.scene.traverse(child => { if(child.isMesh || child.isSkinnedMesh) objMap.set(child, { obj: c, type: 'character', id: c.id }); });
+                    }
+                });
+                
+                this.environments.forEach(env => {
+                    if (env.group.visible) {
+                        interactables.push(env.group);
+                        env.group.traverse(child => { if(child.isMesh || child.isSkinnedMesh) objMap.set(child, { obj: env, type: 'environment', id: env.id }); });
+                    }
+                });
+                
+                this.lights.forEach(l => {
+                    if (l.helper && l.helper.visible) {
+                        interactables.push(l.helper);
+                        l.helper.traverse(child => { objMap.set(child, { obj: l, type: 'light', id: l.id }); });
+                    }
+                });
+
+                const intersects = this.raycaster.intersectObjects(interactables, true);
+                const hit = intersects.find(i => i.object.visible);
+
+                if (hit && objMap.has(hit.object)) {
+                    const match = objMap.get(hit.object);
+                    this.selectObject(match.obj, match.type, match.id);
+                } else {
+                    this.selectObject(null, null, null);
+                }
+            });
+
+            await this.fetchAnimations();
+            await this.fetchEnvs();
+            await this.fetchCams(); 
 
             this.setupHeader(headerDiv);
             this.setupTimeline(timelineDiv);
@@ -456,14 +531,12 @@ class YedpViewport {
             this.buildViewNav(viewportDiv);
             this.buildSidebar();
             
-            // Add default lights
             this.addLight("ambient");
             this.addLight("directional");
-            const dl = this.lights[1].group; // Light targets are now local, move the group
+            const dl = this.lights[1].group;
             dl.position.set(2, 4, 3);
-            dl.lookAt(0, 0, 0); // Point down towards center
+            dl.lookAt(0, 0, 0); 
             
-            await this.fetchAnimations();
             await this.loadBaseRig();
             
             this.hookNodeWidgets();
@@ -471,7 +544,12 @@ class YedpViewport {
             const resizeObserver = new ResizeObserver(() => this.onResize(viewportDiv));
             resizeObserver.observe(viewportDiv);
 
-            // Start loop
+            // Signal initialization is complete. If ComfyUI saved a state, load it now!
+            this.isInitialized = true;
+            if (this.node.saved_scene_state) {
+                await this.loadScene(this.node.saved_scene_state);
+            }
+
             this.animate();
 
         } catch (e) {
@@ -485,13 +563,210 @@ class YedpViewport {
         const ctx = canvas.getContext('2d');
         ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, 256, 256);
         const grad = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
-        grad.addColorStop(0.0, '#000000'); grad.addColorStop(0.75, '#000000'); 
-        grad.addColorStop(0.85, '#666666'); grad.addColorStop(1.0, '#ffffff'); 
+        
+        grad.addColorStop(0.0, '#000000'); 
+        grad.addColorStop(0.88, '#000000'); 
+        grad.addColorStop(0.90, '#ffffff'); 
+        grad.addColorStop(1.0, '#ffffff'); 
+        
         ctx.fillStyle = grad;
         ctx.beginPath(); ctx.arc(128, 128, 128, 0, Math.PI * 2); ctx.fill();
         const tex = new this.THREE.CanvasTexture(canvas);
         tex.colorSpace = this.THREE.SRGBColorSpace;
         return tex;
+    }
+
+    // --- COMfyUI STATE SERIALIZATION ---
+    serializeScene() {
+        return JSON.stringify({
+            version: 1,
+            camera: {
+                pos: this.camera.position.toArray(),
+                rot: this.camera.rotation.toArray(),
+                target: this.controls.target.toArray(),
+                fov: this.perspCam.fov,
+                isOrtho: this.isOrthographic,
+                camOverrideOffset: this.camOverrideOffset,
+                camOverrideScale: this.camOverrideScale,
+                isCameraOverride: this.isCameraOverride,
+                camKeys: {
+                    start: this.camKeys.start ? { pos: this.camKeys.start.pos.toArray(), quat: this.camKeys.start.quat.toArray(), zoom: this.camKeys.start.zoom } : null,
+                    end: this.camKeys.end ? { pos: this.camKeys.end.pos.toArray(), quat: this.camKeys.end.quat.toArray(), zoom: this.camKeys.end.zoom } : null,
+                    ease: this.camKeys.ease
+                }
+            },
+            lights: this.lights.map(l => ({
+                type: l.type, color: l.color, intensity: l.intensity,
+                range: l.range, angle: l.angle, castShadow: l.castShadow,
+                pos: l.group.position.toArray(), rot: l.group.rotation.toArray()
+            })),
+            characters: this.characters.map(c => ({
+                pos: c.scene.position.toArray(), rot: c.scene.rotation.toArray(), scl: c.scene.scale.toArray(),
+                gender: c.gender, loop: c.loop, animFile: c.animFile
+            })),
+            environments: this.environments.map(e => ({
+                pos: e.group.position.toArray(), rot: e.group.rotation.toArray(), scl: e.group.scale.toArray(),
+                loop: e.loop, envFile: e.envFile
+            })),
+            settings: {
+                isShadedMode: this.isShadedMode,
+                isDepthMode: this.isDepthMode,
+                userNear: this.userNear,
+                userFar: this.userFar,
+                customCamAnim: this.container.querySelector("#sel-cam-anim")?.value || "none"
+            }
+        });
+    }
+
+    async loadScene(stateStr) {
+        if (!stateStr) return;
+        try {
+            console.log("[Yedp] Loading saved scene state from ComfyUI Workflow...");
+            const state = JSON.parse(stateStr);
+            
+            // 1. Wipe Defaults
+            const oldChars = [...this.characters]; oldChars.forEach(c => this.removeCharacter(c.id));
+            const oldEnvs = [...this.environments]; oldEnvs.forEach(e => this.removeEnvironment(e.id));
+            const oldLights = [...this.lights]; oldLights.forEach(l => this.removeLight(l.id));
+
+            // 2. Load General Settings
+            if (state.settings) {
+                this.isShadedMode = state.settings.isShadedMode || false;
+                this.isDepthMode = state.settings.isDepthMode || false;
+                this.userNear = state.settings.userNear || 0.1;
+                this.userFar = state.settings.userFar || 10.0;
+                
+                const chkS = this.container.querySelector("#chk-shaded"); if(chkS) chkS.checked = this.isShadedMode;
+                const chkD = this.container.querySelector("#chk-depth"); if(chkD) chkD.checked = this.isDepthMode;
+                const inpN = this.container.querySelector("#inp-near"); if(inpN) inpN.value = this.userNear;
+                const inpF = this.container.querySelector("#inp-far"); if(inpF) inpF.value = this.userFar;
+                if (this.isDepthMode) this.container.querySelector("#depth-ctrls").style.opacity = "1.0";
+            }
+
+            // 3. Load Camera
+            if (state.camera) {
+                this.isOrthographic = state.camera.isOrtho || false;
+                const chkOrtho = this.container.querySelector("#chk-ortho"); if(chkOrtho) chkOrtho.checked = this.isOrthographic;
+                
+                this.perspCam.fov = state.camera.fov || 45;
+                const fovSld = this.container.querySelector("#inp-cam-fov-sld"); if(fovSld) fovSld.value = this.perspCam.fov;
+                const fovVal = this.container.querySelector("#inp-cam-fov-val"); if(fovVal) fovVal.value = this.perspCam.fov;
+                this.perspCam.updateProjectionMatrix();
+
+                this.camera = this.isOrthographic ? this.orthoCam : this.perspCam;
+                this.camera.position.fromArray(state.camera.pos || [0, 1.2, 4]);
+                this.camera.rotation.fromArray(state.camera.rot || [0, 0, 0]);
+                
+                if (state.camera.target) this.controls.target.fromArray(state.camera.target);
+                else {
+                    const forward = new this.THREE.Vector3(0, 0, -1).applyEuler(this.camera.rotation);
+                    this.controls.target.copy(this.camera.position).add(forward.multiplyScalar(4));
+                }
+                
+                this.camOverrideOffset = state.camera.camOverrideOffset || { rx:0, ry:0, rz:0 };
+                this.camOverrideScale = state.camera.camOverrideScale || 1.0;
+                this.cameraAnimGroup.scale.setScalar(this.camOverrideScale);
+                
+                const inpRx = this.container.querySelector("#inp-cam-rx"); if(inpRx) inpRx.value = this.camOverrideOffset.rx;
+                const inpRy = this.container.querySelector("#inp-cam-ry"); if(inpRy) inpRy.value = this.camOverrideOffset.ry;
+                const inpRz = this.container.querySelector("#inp-cam-rz"); if(inpRz) inpRz.value = this.camOverrideOffset.rz;
+                const inpSc = this.container.querySelector("#inp-cam-scl"); if(inpSc) inpSc.value = this.camOverrideScale;
+
+                this.isCameraOverride = state.camera.isCameraOverride || false;
+                const chkOvr = this.container.querySelector("#cam-override-chk"); if(chkOvr) chkOvr.checked = this.isCameraOverride;
+                this.controls.enabled = !this.isCameraOverride;
+                
+                if (state.camera.camKeys) {
+                    this.camKeys.ease = state.camera.camKeys.ease || 'linear';
+                    if (state.camera.camKeys.start) {
+                        this.camKeys.start = { 
+                            pos: new this.THREE.Vector3().fromArray(state.camera.camKeys.start.pos), 
+                            quat: new this.THREE.Quaternion().fromArray(state.camera.camKeys.start.quat), 
+                            zoom: state.camera.camKeys.start.zoom || 1 
+                        };
+                    }
+                    if (state.camera.camKeys.end) {
+                        this.camKeys.end = { 
+                            pos: new this.THREE.Vector3().fromArray(state.camera.camKeys.end.pos), 
+                            quat: new this.THREE.Quaternion().fromArray(state.camera.camKeys.end.quat), 
+                            zoom: state.camera.camKeys.end.zoom || 1 
+                        };
+                    }
+                }
+                this.controls.object = this.camera;
+                this.controls.update();
+            }
+
+            if (state.settings && state.settings.customCamAnim && state.settings.customCamAnim !== "none") {
+                const selCam = this.container.querySelector("#sel-cam-anim");
+                if (selCam) selCam.value = state.settings.customCamAnim;
+                await this.loadCameraAnim(state.settings.customCamAnim);
+            }
+
+            // 4. Load Lights
+            if (state.lights) {
+                state.lights.forEach(l => {
+                    this.addLight(l.type);
+                    const newL = this.lights[this.lights.length - 1];
+                    newL.color = l.color; newL.intensity = l.intensity; newL.range = l.range; newL.angle = l.angle; newL.castShadow = l.castShadow;
+                    newL.group.position.fromArray(l.pos); newL.group.rotation.fromArray(l.rot);
+                    this.updateLightType(newL);
+                });
+            }
+
+            // 5. Load Characters
+            if (state.characters) {
+                for (const cData of state.characters) {
+                    this.addCharacter();
+                    const newC = this.characters[this.characters.length - 1];
+                    newC.scene.position.fromArray(cData.pos);
+                    newC.scene.rotation.fromArray(cData.rot);
+                    newC.scene.scale.fromArray(cData.scl);
+                    newC.gender = cData.gender || 'M';
+                    newC.loop = cData.loop !== false;
+                    if (cData.animFile && cData.animFile !== "none") await this.loadAnimationForChar(newC, cData.animFile);
+                }
+            }
+
+            // 6. Load Environments
+            if (state.environments) {
+                for (const eData of state.environments) {
+                    this.addEnvironment();
+                    const newE = this.environments[this.environments.length - 1];
+                    newE.group.position.fromArray(eData.pos);
+                    newE.group.rotation.fromArray(eData.rot);
+                    newE.group.scale.fromArray(eData.scl);
+                    newE.loop = eData.loop !== false;
+                    if (eData.envFile && eData.envFile !== "none") await this.loadEnvironmentFile(newE, eData.envFile);
+                }
+            }
+            
+            this.updateVisibilities();
+            this.renderCharacterCards();
+            this.renderEnvironmentCards();
+            this.renderLightCards();
+            this.forceUpdateFrame();
+
+        } catch (e) {
+            console.error("[Yedp] Failed to load saved scene state:", e);
+        }
+    }
+
+    forceUpdateFrame() {
+        const totalFrames = this.getWidgetValue("frame_count", 48);
+        const slider = this.container.querySelector("#t-slider");
+        const currentFrame = slider ? parseInt(slider.value) : 0;
+        
+        const timeLabel = this.container.querySelector("#t-time");
+        if (timeLabel) timeLabel.innerText = `${currentFrame} / ${totalFrames}`;
+
+        this.evaluateAnimations(this.globalTime);
+        this.applyCameraKeyframes(currentFrame / Math.max(1, totalFrames - 1));
+        
+        this.characters.forEach(c => c.scene.updateMatrixWorld(true));
+        this.environments.forEach(e => e.group.updateMatrixWorld(true));
+        
+        if (this.controls) this.controls.update();
     }
 
     // --- UI SETUP ---
@@ -502,18 +777,19 @@ class YedpViewport {
                 <div style="width:1px; height:16px; background:#444;"></div>
                 <label style="color:#ccc; font-size:11px; cursor:pointer;"><input type="checkbox" id="chk-depth"> Depth</label>
                 <div id="depth-ctrls" style="display:flex; align-items:center; gap:4px; opacity:0.5; transition:opacity 0.2s;">
-                    <span style="color:#4ade80; font-size:10px; font-weight:bold;">NEAR DEPTH:</span>
+                    <span style="color:#4ade80; font-size:10px; font-weight:bold;">NEAR:</span>
                     <input id="inp-near" type="number" step="0.1" value="0.1" style="width:40px; background:#111; color:#4ade80; border:1px solid #4ade80; font-size:10px; padding:1px 2px; border-radius:2px; font-weight:bold;">
-                    <span style="color:#4ade80; font-size:10px; font-weight:bold; margin-left:4px;">FAR DEPTH:</span>
+                    <span style="color:#4ade80; font-size:10px; font-weight:bold; margin-left:4px;">FAR:</span>
                     <input id="inp-far" type="number" step="0.5" value="10.0" style="width:40px; background:#111; color:#4ade80; border:1px solid #4ade80; font-size:10px; padding:1px 2px; border-radius:2px; font-weight:bold;">
                 </div>
                 <div style="width:1px; height:16px; background:#444;"></div>
                 <label style="color:#666; font-size:11px; cursor:pointer;"><input type="checkbox" id="chk-skel" checked> Skel</label>
             </div>
-            <div style="display:flex; gap:4px;">
+            <div style="display:flex; gap:4px; align-items:center;">
                 <span id="lbl-res" style="color:#00d2ff; font-family:monospace; font-size:10px; margin-right:5px; align-self:center;">512x512</span>
+                <button id="btn-refresh" style="border:1px solid #4ade80; color:#4ade80; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;" title="Refresh Files">↻ SYNC FOLDERS</button>
                 <button id="btn-bake-frame" style="border:1px solid #ffaa00; color:#ffaa00; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE FRAME</button>
-                <button id="btn-bake" style="border:1px solid #ff0055; color:#ff0055; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE V9.18</button>
+                <button id="btn-bake" style="border:1px solid #ff0055; color:#ff0055; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE V9.21</button>
             </div>
         `;
 
@@ -528,6 +804,7 @@ class YedpViewport {
             }
             this.isShadedMode = e.target.checked; 
             this.updateVisibilities(); 
+            this.forceUpdateFrame();
         };
         
         chkDepth.onchange = (e) => {
@@ -538,15 +815,38 @@ class YedpViewport {
             this.isDepthMode = e.target.checked;
             div.querySelector("#depth-ctrls").style.opacity = this.isDepthMode ? "1.0" : "0.5";
             this.updateVisibilities();
+            this.forceUpdateFrame();
         };
 
-        div.querySelector("#inp-near").onchange = (e) => { this.userNear = parseFloat(e.target.value); if(this.isDepthMode) this.updateCameraBounds(); };
-        div.querySelector("#inp-far").onchange = (e) => { this.userFar = parseFloat(e.target.value); if(this.isDepthMode) this.updateCameraBounds(); };
+        div.querySelector("#inp-near").onchange = (e) => { this.userNear = parseFloat(e.target.value); if(this.isDepthMode) { this.updateCameraBounds(); this.forceUpdateFrame(); } };
+        div.querySelector("#inp-far").onchange = (e) => { this.userFar = parseFloat(e.target.value); if(this.isDepthMode) { this.updateCameraBounds(); this.forceUpdateFrame(); } };
         
         div.querySelector("#chk-skel").onchange = (e) => {
             this.characters.forEach(c => { if(c.skeletonHelper) c.skeletonHelper.visible = e.target.checked; });
+            this.forceUpdateFrame();
         };
         
+        // NEW SYNC BUTTON LOGIC
+        div.querySelector("#btn-refresh").onclick = async () => {
+            const btn = div.querySelector("#btn-refresh");
+            btn.innerText = "SYNCING...";
+            await this.fetchAnimations();
+            await this.fetchEnvs();
+            await this.fetchCams();
+            
+            this.renderCharacterCards();
+            this.renderEnvironmentCards();
+            
+            const selCam = this.container.querySelector("#sel-cam-anim");
+            if (selCam) {
+                const currentVal = selCam.value;
+                selCam.innerHTML = "";
+                this.availableCams.forEach(anim => selCam.add(new Option(anim, anim)));
+                selCam.value = this.availableCams.includes(currentVal) ? currentVal : "none";
+            }
+            btn.innerText = "↻ SYNC FOLDERS";
+        };
+
         div.querySelector("#btn-bake-frame").onclick = () => this.performBake(true);
         div.querySelector("#btn-bake").onclick = () => this.performBake(false);
     }
@@ -561,7 +861,6 @@ class YedpViewport {
         
         const btn = div.querySelector("#btn-play");
         const slider = div.querySelector("#t-slider");
-        const lbl = div.querySelector("#t-time");
         
         btn.onclick = () => { this.isPlaying = !this.isPlaying; btn.innerText = this.isPlaying ? "⏸" : "▶"; };
         slider.onmousedown = () => { this.isDraggingSlider = true; this.isPlaying = false; btn.innerText = "▶"; };
@@ -569,23 +868,30 @@ class YedpViewport {
         
         slider.oninput = (e) => {
             const frame = parseInt(e.target.value);
-            const totalFrames = this.getWidgetValue("frame_count", 48);
             const fps = this.getWidgetValue("fps", 24);
-            
-            // V9.9 FIX: Set the exact float time from the scrubber
             this.globalTime = frame / fps;
-            
-            this.characters.forEach(c => {
-                if(c.action && c.duration > 0) { 
-                    c.action.time = c.loop ? (this.globalTime % c.duration) : Math.min(this.globalTime, c.duration);
-                    c.mixer.update(0); 
-                }
-            });
-            lbl.innerText = `${frame} / ${totalFrames}`;
-            
-            // Preview camera if scrubbing
-            this.applyCameraKeyframes(frame / Math.max(1, totalFrames - 1));
+            this.forceUpdateFrame();
         };
+    }
+
+    evaluateAnimations(t) {
+        this.characters.forEach(c => {
+            if(c.action && c.duration > 0) { 
+                c.action.time = c.loop ? (t % c.duration) : Math.min(t, c.duration);
+                c.mixer.update(0); 
+            }
+        });
+        this.environments.forEach(e => {
+            if(e.action && e.duration > 0) { 
+                e.action.time = e.loop ? (t % e.duration) : Math.min(t, e.duration);
+                e.mixer.update(0); 
+            }
+        });
+        if (this.cameraAction && this.cameraMixer) {
+            const d = this.cameraAction.getClip().duration;
+            this.cameraAction.time = (t % d);
+            this.cameraMixer.update(0);
+        }
     }
 
     handleKeyDown(e) {
@@ -593,7 +899,9 @@ class YedpViewport {
         const k = e.key.toLowerCase();
         if (k === 'g') { this.transformControls.setMode("translate"); this.updateGizmoUI("translate"); }
         if (k === 'r') { this.transformControls.setMode("rotate"); this.updateGizmoUI("rotate"); }
-        if (k === 's' && this.selected.type === 'character') { this.transformControls.setMode("scale"); this.updateGizmoUI("scale"); }
+        if (k === 's' && (this.selected.type === 'character' || this.selected.type === 'environment')) { 
+            this.transformControls.setMode("scale"); this.updateGizmoUI("scale"); 
+        }
     }
 
     buildGizmoPanel(vpDiv) {
@@ -633,7 +941,7 @@ class YedpViewport {
         panel.append(
             createIconBtn("translate", pathMove, "Move (G)", () => { this.transformControls.setMode("translate"); this.updateGizmoUI("translate"); }),
             createIconBtn("rotate", pathRot, "Rotate (R)", () => { this.transformControls.setMode("rotate"); this.updateGizmoUI("rotate"); }),
-            createIconBtn("scale", pathScale, "Scale (S)", () => { if(this.selected.type === 'character') { this.transformControls.setMode("scale"); this.updateGizmoUI("scale"); } }),
+            createIconBtn("scale", pathScale, "Scale (S)", () => { if(['character', 'environment'].includes(this.selected.type)) { this.transformControls.setMode("scale"); this.updateGizmoUI("scale"); } }),
             createIconBtn("deselect", pathDeselect, "Deselect", () => { this.selectObject(null, null, null); })
         );
         vpDiv.appendChild(panel);
@@ -644,19 +952,11 @@ class YedpViewport {
         Object.keys(this.gizmoBtns).forEach(k => {
             const b = this.gizmoBtns[k];
             if (k === mode) {
-                b.dataset.active = "true";
-                b.style.background = "#00d2ff";
-                b.style.color = "#000";
-                b.style.borderColor = "#00d2ff";
+                b.dataset.active = "true"; b.style.background = "#00d2ff"; b.style.color = "#000"; b.style.borderColor = "#00d2ff";
             } else {
-                b.dataset.active = "false";
-                b.style.background = "#333";
-                b.style.color = "#ccc";
-                b.style.borderColor = "#555";
+                b.dataset.active = "false"; b.style.background = "#333"; b.style.color = "#ccc"; b.style.borderColor = "#555";
             }
-            
-            // Disable scale if not character
-            if (k === 'scale' && this.selected.type !== 'character') {
+            if (k === 'scale' && !['character', 'environment'].includes(this.selected.type)) {
                 b.style.opacity = "0.3"; b.style.pointerEvents = "none";
             } else if (k === 'scale') {
                 b.style.opacity = "1.0"; b.style.pointerEvents = "auto";
@@ -675,19 +975,13 @@ class YedpViewport {
         const createViewBtn = (lbl, dir) => {
             const b = document.createElement("button");
             b.innerText = lbl;
-            Object.assign(b.style, {
-                background: "#222", color: "#ccc", border: "1px solid #444", borderRadius: "3px",
-                cursor: "pointer", fontSize: "9px", padding: "4px 8px", fontWeight: "bold",
-                transition: "all 0.1s"
-            });
+            Object.assign(b.style, { background: "#222", color: "#ccc", border: "1px solid #444", borderRadius: "3px", cursor: "pointer", fontSize: "9px", padding: "4px 8px", fontWeight: "bold", transition: "all 0.1s" });
             b.onmouseover = () => { b.style.background = "#00d2ff"; b.style.color = "#000"; b.style.borderColor = "#00d2ff"; };
             b.onmouseout = () => { b.style.background = "#222"; b.style.color = "#ccc"; b.style.borderColor = "#444"; };
-            
             b.onclick = () => {
                 const dist = this.camera.position.distanceTo(this.controls.target);
                 const tgt = this.controls.target;
                 const p = this.camera.position;
-                
                 switch(dir) {
                     case 'top': p.set(tgt.x, tgt.y + dist, tgt.z); break;
                     case 'bottom': p.set(tgt.x, tgt.y - dist, tgt.z); break;
@@ -695,25 +989,42 @@ class YedpViewport {
                     case 'back': p.set(tgt.x, tgt.y, tgt.z - dist); break;
                     case 'left': p.set(tgt.x - dist, tgt.y, tgt.z); break;
                     case 'right': p.set(tgt.x + dist, tgt.y, tgt.z); break;
+                    case 'reset': 
+                        p.set(0, 1.2, 4);
+                        tgt.set(0, 1, 0);
+                        this.camera.zoom = 1;
+                        if(this.isOrthographic) this.orthoCam.updateProjectionMatrix();
+                        else this.perspCam.updateProjectionMatrix();
+                        
+                        const ovrChk = this.container.querySelector("#cam-override-chk");
+                        if (this.isCameraOverride && ovrChk) {
+                            ovrChk.checked = false;
+                            this.isCameraOverride = false;
+                            this.controls.enabled = true;
+                        }
+                        break;
                 }
                 this.controls.update(); 
                 this.updateTransformUIFromObject();
+                this.forceUpdateFrame();
             };
             return b;
         };
-        
         nav.append(
             createViewBtn("TOP", "top"), createViewBtn("BTM", "bottom"),
             createViewBtn("LEFT", "left"), createViewBtn("RIGHT", "right"), 
-            createViewBtn("FRONT", "front"), createViewBtn("BACK", "back")
+            createViewBtn("FRONT", "front"), createViewBtn("BACK", "back"),
+            createViewBtn("RESET", "reset")
         );
+        nav.lastChild.style.gridColumn = "1 / span 2";
+        nav.lastChild.style.borderColor = "#555";
+        
         vpDiv.appendChild(nav);
     }
 
     buildSidebar() {
         const createBtn = (text, color="#444", hover="#555") => {
-            const b = document.createElement("button");
-            b.innerText = text;
+            const b = document.createElement("button"); b.innerText = text;
             Object.assign(b.style, { background: color, color: "#fff", border: "1px solid #555", borderRadius: "3px", cursor: "pointer", padding: "4px", fontSize: "10px", flex: "1" });
             b.onmouseover = () => b.style.background = hover;
             b.onmouseout = () => b.style.background = color;
@@ -723,141 +1034,105 @@ class YedpViewport {
         const createCollapsible = (titleText, defaultOpen) => {
             const wrap = document.createElement("div");
             Object.assign(wrap.style, { background: "#222", borderRadius: "4px", border: "1px solid #333" });
-            
             const head = document.createElement("div");
             Object.assign(head.style, { 
-                background: "#16252d", 
-                borderLeft: "3px solid #00d2ff", 
-                padding: "8px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", 
-                borderBottom: defaultOpen ? "1px solid #333" : "none", 
-                borderTopRightRadius: "4px", borderBottomRightRadius: defaultOpen ? "0px" : "4px" 
+                background: "#16252d", borderLeft: "3px solid #00d2ff", padding: "8px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", 
+                borderBottom: defaultOpen ? "1px solid #333" : "none", borderTopRightRadius: "4px", borderBottomRightRadius: defaultOpen ? "0px" : "4px" 
             });
-            
             const titleSpan = document.createElement("span");
             Object.assign(titleSpan.style, { fontWeight: "bold", color: "#fff", fontSize: "11px", display: "flex", alignItems: "center", gap: "6px" });
-            titleSpan.innerHTML = `<span style="color:#00d2ff; font-size:9px;">${defaultOpen ? '▼' : '▶'}</span> ${titleText}`;
-
+            titleSpan.innerHTML = `<span style="color:#00d2ff; font-size:9px; width:10px; display:inline-block; text-align:center;">${defaultOpen ? '▼' : '▶'}</span> <span style="display:flex; align-items:center; gap:4px;">${titleText}</span>`;
             head.appendChild(titleSpan);
-
             const content = document.createElement("div");
             Object.assign(content.style, { padding: "8px", display: defaultOpen ? "flex" : "none", flexDirection: "column", gap: "6px" });
-
             head.onclick = (e) => {
-                if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') return; 
+                if (['BUTTON', 'INPUT', 'SELECT', 'OPTION'].includes(e.target.tagName)) return; 
                 const isOpen = content.style.display !== "none";
                 content.style.display = isOpen ? "none" : "flex";
                 head.style.borderBottom = isOpen ? "none" : "1px solid #333";
                 head.style.borderBottomRightRadius = isOpen ? "4px" : "0px";
-                titleSpan.innerHTML = `<span style="color:#00d2ff; font-size:9px;">${isOpen ? '▶' : '▼'}</span> ${titleText}`;
+                titleSpan.innerHTML = `<span style="color:#00d2ff; font-size:9px; width:10px; display:inline-block; text-align:center;">${isOpen ? '▶' : '▼'}</span> <span style="display:flex; align-items:center; gap:4px;">${titleText}</span>`;
             };
-
             wrap.append(head, content);
             return { wrap, head, content };
         };
 
-        // --- TRANSFORM PANEL (Collapsible) ---
-        const transCol = createCollapsible("Transform", true);
+        // UI SVG Icons
+        const iconTransform = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>`;
+        const iconCamera = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>`;
+        const iconLighting = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`;
+        const iconChars = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>`;
+        const iconEnv = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
+
+        // TRANSFORM
+        const transCol = createCollapsible(`${iconTransform} Transform`, true);
         const tRow = (lbl, keys) => {
             const r = document.createElement("div"); r.style.display = "flex"; r.style.gap = "4px"; r.style.alignItems = "center";
-            const l = document.createElement("span"); l.innerText = lbl; l.style.width = "20px"; l.style.color = "#888";
-            r.appendChild(l);
+            const l = document.createElement("span"); l.innerText = lbl; l.style.width = "20px"; l.style.color = "#888"; r.appendChild(l);
             keys.forEach(k => {
                 const inp = document.createElement("input"); inp.type = "number"; inp.step = "0.1";
                 Object.assign(inp.style, { flex: "1", width: "0", background: "#111", color: "#fff", border: "1px solid #444", fontSize: "10px", padding: "2px" });
-                inp.onchange = () => this.updateObjectFromTransformUI();
-                this.uiTransformInputs[k] = inp;
-                r.appendChild(inp);
+                inp.onchange = () => { this.updateObjectFromTransformUI(); this.forceUpdateFrame(); };
+                this.uiTransformInputs[k] = inp; r.appendChild(inp);
             });
             return r;
         };
-        transCol.content.append(
-            tRow("Pos", ['px', 'py', 'pz']),
-            tRow("Rot", ['rx', 'ry', 'rz']),
-            tRow("Scl", ['sx', 'sy', 'sz'])
-        );
+        transCol.content.append(tRow("Pos", ['px', 'py', 'pz']), tRow("Rot", ['rx', 'ry', 'rz']), tRow("Scl", ['sx', 'sy', 'sz']));
         this.uiSidebar.appendChild(transCol.wrap);
 
-        // --- CAMERA (Collapsible) ---
-        const camCol = createCollapsible("Camera", false);
-        
-        // Ortho and FOV Row
+        // CAMERA
+        const camCol = createCollapsible(`${iconCamera} Camera`, false);
         const camSettingsRow = document.createElement("div");
         Object.assign(camSettingsRow.style, { display: "flex", gap: "6px", alignItems: "center", marginBottom: "4px", flexWrap: "wrap" });
-        
         const btnSelCam = createBtn("Select Cam", "#334", "#445");
-        btnSelCam.style.flex = "0 0 auto";
-        btnSelCam.onclick = () => this.selectObject(this.camera, 'camera', 'main');
+        btnSelCam.style.flex = "0 0 auto"; btnSelCam.onclick = () => this.selectObject(this.camera, 'camera', 'main');
 
         const lblOrtho = document.createElement("label");
         Object.assign(lblOrtho.style, { cursor: "pointer", display: "flex", gap: "4px", color: "#ccc", fontSize: "10px", alignItems: "center" });
         const chkOrtho = document.createElement("input"); chkOrtho.type = "checkbox"; chkOrtho.checked = this.isOrthographic;
+        chkOrtho.id = "chk-ortho";
         lblOrtho.append(chkOrtho, "Ortho");
 
         const fovContainer = document.createElement("div");
         Object.assign(fovContainer.style, { display: "flex", gap: "4px", alignItems: "center", flex: "1", transition: "opacity 0.2s", minWidth: "0" });
         const lblFov = document.createElement("span"); lblFov.innerText = "FOV"; Object.assign(lblFov.style, {fontSize: "10px", color: "#888"});
         const sldFov = document.createElement("input"); sldFov.type = "range"; sldFov.min = 10; sldFov.max = 120; sldFov.value = this.perspCam.fov; 
+        sldFov.id = "inp-cam-fov-sld";
         Object.assign(sldFov.style, { flex: "1", width: "0", minWidth: "30px" });
         const valFov = document.createElement("input"); valFov.type = "number"; valFov.min = 10; valFov.max = 120; valFov.value = this.perspCam.fov; 
+        valFov.id = "inp-cam-fov-val";
         Object.assign(valFov.style, { fontSize: "10px", color: "#00d2ff", width: "36px", background: "#111", border: "1px solid #444", padding: "1px 2px", borderRadius: "2px", textAlign: "right" });
         
         fovContainer.append(lblFov, sldFov, valFov);
         camSettingsRow.append(btnSelCam, lblOrtho, fovContainer);
 
-        // Wiring Camera Toggles
         chkOrtho.onchange = (e) => {
             this.isOrthographic = e.target.checked;
             fovContainer.style.opacity = this.isOrthographic ? "0.3" : "1.0";
-            sldFov.disabled = this.isOrthographic;
-            valFov.disabled = this.isOrthographic;
+            sldFov.disabled = this.isOrthographic; valFov.disabled = this.isOrthographic;
 
             const oldCam = this.isOrthographic ? this.perspCam : this.orthoCam;
             this.camera = this.isOrthographic ? this.orthoCam : this.perspCam;
-
-            this.camera.position.copy(oldCam.position);
-            this.camera.quaternion.copy(oldCam.quaternion);
-            this.camera.zoom = oldCam.zoom;
+            this.camera.position.copy(oldCam.position); this.camera.quaternion.copy(oldCam.quaternion); this.camera.zoom = oldCam.zoom;
 
             this.controls.object = this.camera;
             if (this.selected.type !== 'camera') this.transformControls.camera = this.camera;
-            
             if (this.selected.type === 'camera') this.selectObject(this.camera, 'camera', 'main');
             const vpArea = this.container.querySelector(".yedp-vp-area");
-            if (vpArea) this.onResize(vpArea); // Force UI update
+            if (vpArea) this.onResize(vpArea); 
+            this.forceUpdateFrame();
         };
-
-        sldFov.oninput = (e) => {
-            valFov.value = e.target.value;
-            this.perspCam.fov = parseFloat(e.target.value);
-            this.perspCam.updateProjectionMatrix();
-        };
-
-        valFov.oninput = (e) => {
-            sldFov.value = e.target.value;
-            this.perspCam.fov = parseFloat(e.target.value);
-            this.perspCam.updateProjectionMatrix();
-        };
+        sldFov.oninput = (e) => { valFov.value = e.target.value; this.perspCam.fov = parseFloat(e.target.value); this.perspCam.updateProjectionMatrix(); this.forceUpdateFrame(); };
+        valFov.oninput = (e) => { sldFov.value = e.target.value; this.perspCam.fov = parseFloat(e.target.value); this.perspCam.updateProjectionMatrix(); this.forceUpdateFrame(); };
 
         const camRow1 = document.createElement("div"); camRow1.style.display = "flex"; camRow1.style.gap = "4px"; camRow1.style.marginBottom = "4px";
-        const btnSetStart = createBtn("Set Start");
-        const btnSetEnd = createBtn("Set End");
-        
+        const btnSetStart = createBtn("Set Start"); const btnSetEnd = createBtn("Set End");
         btnSetStart.onclick = () => {
-            this.camKeys.start = { 
-                pos: this.camera.position.clone(), 
-                quat: this.camera.quaternion.clone(),
-                target: this.controls.target.clone(),
-                zoom: this.camera.zoom
-            };
+            this.camKeys.start = { pos: this.camera.position.clone(), quat: this.camera.quaternion.clone(), target: this.controls.target.clone(), zoom: this.camera.zoom };
             btnSetStart.innerText = "Start Set ✓"; btnSetStart.style.borderColor = "#0f0";
         };
         btnSetEnd.onclick = () => {
-            this.camKeys.end = { 
-                pos: this.camera.position.clone(), 
-                quat: this.camera.quaternion.clone(),
-                target: this.controls.target.clone(),
-                zoom: this.camera.zoom
-            };
+            this.camKeys.end = { pos: this.camera.position.clone(), quat: this.camera.quaternion.clone(), target: this.controls.target.clone(), zoom: this.camera.zoom };
             btnSetEnd.innerText = "End Set ✓"; btnSetEnd.style.borderColor = "#0f0";
         };
         
@@ -865,45 +1140,98 @@ class YedpViewport {
         const selEase = document.createElement("select");
         Object.assign(selEase.style, { flex: "1", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px" });
         ['linear', 'easeIn', 'easeOut', 'easeInOut'].forEach(e => selEase.add(new Option(e, e)));
-        selEase.onchange = (e) => this.camKeys.ease = e.target.value;
-        
-        const btnClearCam = createBtn("Clear", "#522", "#733");
+        selEase.onchange = (e) => { this.camKeys.ease = e.target.value; this.forceUpdateFrame(); };
+        const btnClearCam = createBtn("Clear Keyframes", "#522", "#733");
         btnClearCam.onclick = () => {
             this.camKeys.start = null; this.camKeys.end = null;
             btnSetStart.innerText = "Set Start"; btnSetStart.style.borderColor = "#555";
             btnSetEnd.innerText = "Set End"; btnSetEnd.style.borderColor = "#555";
         };
+        camRow1.append(btnSetStart, btnSetEnd); camRow2.append(selEase, btnClearCam);
 
-        camRow1.append(btnSetStart, btnSetEnd);
-        camRow2.append(selEase, btnClearCam);
-        camCol.content.append(camSettingsRow, camRow1, camRow2);
+        // Custom Camera Import Block
+        const camImportRow = document.createElement("div");
+        Object.assign(camImportRow.style, { display: "flex", gap: "4px", alignItems: "center", marginTop: "8px", borderTop: "1px solid #333", paddingTop: "8px" });
+        
+        const lblOverride = document.createElement("label");
+        Object.assign(lblOverride.style, { cursor: "pointer", display: "flex", gap: "2px", color: "#ccc", fontSize: "10px", alignItems: "center" });
+        const chkOverride = document.createElement("input"); 
+        chkOverride.type = "checkbox"; 
+        chkOverride.id = "cam-override-chk";
+        chkOverride.checked = this.isCameraOverride;
+        chkOverride.onchange = (e) => { 
+            this.isCameraOverride = e.target.checked; 
+            this.controls.enabled = !this.isCameraOverride;
+            this.forceUpdateFrame();
+        };
+        lblOverride.append(chkOverride, "Override");
+
+        const selCamAnim = document.createElement("select");
+        selCamAnim.id = "sel-cam-anim";
+        Object.assign(selCamAnim.style, { flex: "1", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px" });
+        this.availableCams.forEach(anim => selCamAnim.add(new Option(anim, anim))); 
+        selCamAnim.onchange = (e) => { this.loadCameraAnim(e.target.value); };
+        camImportRow.append(lblOverride, selCamAnim);
+
+        // FIX: FBX Maya Camera Local Offset logic
+        const camImportFixRow = document.createElement("div");
+        Object.assign(camImportFixRow.style, { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px", marginTop: "4px" });
+        
+        const makeFixRow = (lbl, def, callback, id) => {
+            const wrap = document.createElement("div");
+            Object.assign(wrap.style, { display: "flex", gap: "2px", alignItems: "center", color: "#888", fontSize: "9px" });
+            const inp = document.createElement("input"); inp.type = "number"; inp.step = "0.1"; inp.value = def;
+            inp.id = id;
+            Object.assign(inp.style, { width: "100%", background: "#111", color: "#fff", border: "1px solid #444", fontSize: "9px", padding: "1px" });
+            inp.onchange = callback;
+            const label = document.createElement("span"); label.innerText = lbl; label.style.width = "20px";
+            wrap.append(label, inp);
+            return wrap;
+        };
+
+        const rxWrap = makeFixRow("Rx", "0", (e) => { this.camOverrideOffset.rx = parseFloat(e.target.value)||0; this.forceUpdateFrame(); }, "inp-cam-rx");
+        const ryWrap = makeFixRow("Ry", "0", (e) => { this.camOverrideOffset.ry = parseFloat(e.target.value)||0; this.forceUpdateFrame(); }, "inp-cam-ry");
+        const rzWrap = makeFixRow("Rz", "0", (e) => { this.camOverrideOffset.rz = parseFloat(e.target.value)||0; this.forceUpdateFrame(); }, "inp-cam-rz");
+        const scWrap = makeFixRow("Scl", "1.0", (e) => { this.camOverrideScale = parseFloat(e.target.value)||1.0; this.cameraAnimGroup.scale.setScalar(this.camOverrideScale); this.cameraAnimGroup.updateMatrixWorld(true); this.forceUpdateFrame(); }, "inp-cam-scl");
+        scWrap.querySelector('input').step = "0.01";
+
+        camImportFixRow.append(rxWrap, ryWrap, rzWrap, scWrap);
+
+        camCol.content.append(camSettingsRow, camRow1, camRow2, camImportRow, camImportFixRow);
         this.uiSidebar.appendChild(camCol.wrap);
 
-        // --- LIGHTING (Collapsible) ---
-        const lightCol = createCollapsible("Lighting", true);
+        // LIGHTING
+        const lightCol = createCollapsible(`${iconLighting} Lighting`, false);
         const btnAddLight = createBtn("+ Add Light", "#542", "#653");
         btnAddLight.style.flex = "none"; btnAddLight.style.padding = "2px 6px"; btnAddLight.style.fontSize = "9px";
         btnAddLight.onclick = (e) => { e.stopPropagation(); this.addLight(); };
         lightCol.head.appendChild(btnAddLight);
-        
         this.uiLightList = document.createElement("div");
         this.uiLightList.style.display = "flex"; this.uiLightList.style.flexDirection = "column"; this.uiLightList.style.gap = "6px";
         lightCol.content.appendChild(this.uiLightList);
         this.uiSidebar.appendChild(lightCol.wrap);
 
-        // --- CHARACTERS (Collapsible) ---
-        const charCol = createCollapsible("Characters", true);
-        
+        // CHARACTERS
+        const charCol = createCollapsible(`${iconChars} Characters`, true);
         const btnAddChar = createBtn("+ Add Char", "#252", "#373");
         btnAddChar.style.flex = "none"; btnAddChar.style.padding = "2px 6px"; btnAddChar.style.fontSize = "9px";
         btnAddChar.onclick = (e) => { e.stopPropagation(); this.addCharacter(); };
         charCol.head.appendChild(btnAddChar);
-        
         this.uiCharList = document.createElement("div");
         this.uiCharList.style.display = "flex"; this.uiCharList.style.flexDirection = "column"; this.uiCharList.style.gap = "6px";
         charCol.content.appendChild(this.uiCharList);
-
         this.uiSidebar.appendChild(charCol.wrap);
+
+        // ENVIRONMENTS
+        const envCol = createCollapsible(`${iconEnv} Environments`, true);
+        const btnAddEnv = createBtn("+ Add Env", "#353", "#474");
+        btnAddEnv.style.flex = "none"; btnAddEnv.style.padding = "2px 6px"; btnAddEnv.style.fontSize = "9px";
+        btnAddEnv.onclick = (e) => { e.stopPropagation(); this.addEnvironment(); };
+        envCol.head.appendChild(btnAddEnv);
+        this.uiEnvList = document.createElement("div");
+        this.uiEnvList.style.display = "flex"; this.uiEnvList.style.flexDirection = "column"; this.uiEnvList.style.gap = "6px";
+        envCol.content.appendChild(this.uiEnvList);
+        this.uiSidebar.appendChild(envCol.wrap);
         
         this.updateTransformUIFromObject();
     }
@@ -915,11 +1243,11 @@ class YedpViewport {
         if (!obj) {
             this.transformControls.detach();
         } else if (type === 'camera') {
-            this.transformControls.detach(); // Dragging active camera is buggy, use text inputs or viewport nav
+            this.transformControls.detach(); 
         } else {
             this.transformControls.attach(type === 'character' ? obj.scene : obj.group);
             if (type === 'light' && this.transformControls.getMode() === 'scale') {
-                this.transformControls.setMode('translate'); // No scaling lights
+                this.transformControls.setMode('translate'); 
             }
         }
         
@@ -936,7 +1264,7 @@ class YedpViewport {
             return;
         }
         
-        const tgt = s.type === 'character' ? s.obj.scene : (s.type === 'light' ? s.obj.group : s.obj);
+        const tgt = s.type === 'character' ? s.obj.scene : (s.type === 'light' || s.type === 'environment' ? s.obj.group : s.obj);
         
         Object.values(ui).forEach(inp => { inp.disabled = false; inp.style.opacity = "1.0"; });
         
@@ -945,7 +1273,7 @@ class YedpViewport {
         ui.ry.value = this.THREE.MathUtils.radToDeg(tgt.rotation.y).toFixed(1); 
         ui.rz.value = this.THREE.MathUtils.radToDeg(tgt.rotation.z).toFixed(1);
         
-        if (s.type !== 'character') {
+        if (s.type === 'camera' || s.type === 'light') {
             ui.sx.disabled = ui.sy.disabled = ui.sz.disabled = true;
             ui.sx.style.opacity = ui.sy.style.opacity = ui.sz.style.opacity = "0.3";
             ui.sx.value = ui.sy.value = ui.sz.value = "1.0";
@@ -957,298 +1285,68 @@ class YedpViewport {
     updateObjectFromTransformUI() {
         const s = this.selected;
         if (!s.obj) return;
-        const tgt = s.type === 'character' ? s.obj.scene : (s.type === 'light' ? s.obj.group : s.obj);
+        const tgt = s.type === 'character' ? s.obj.scene : (s.type === 'light' || s.type === 'environment' ? s.obj.group : s.obj);
         const ui = this.uiTransformInputs;
         
-        const px = parseFloat(ui.px.value)||0;
-        const py = parseFloat(ui.py.value)||0;
-        const pz = parseFloat(ui.pz.value)||0;
+        const px = parseFloat(ui.px.value)||0; const py = parseFloat(ui.py.value)||0; const pz = parseFloat(ui.pz.value)||0;
         const rx = this.THREE.MathUtils.degToRad(parseFloat(ui.rx.value)||0);
         const ry = this.THREE.MathUtils.degToRad(parseFloat(ui.ry.value)||0);
         const rz = this.THREE.MathUtils.degToRad(parseFloat(ui.rz.value)||0);
 
         if (s.type === 'camera') {
-            // Apply Translation (which also moves the target to preserve look angle)
             const deltaPos = new this.THREE.Vector3(px, py, pz).sub(this.camera.position);
             this.camera.position.add(deltaPos);
             this.controls.target.add(deltaPos);
-
-            // Apply Rotation (which requires calculating a new target pushed out along the forward vector)
             const dist = this.camera.position.distanceTo(this.controls.target) || 1.0;
             this.camera.rotation.set(rx, ry, rz);
             const forward = new this.THREE.Vector3(0, 0, -1).applyEuler(this.camera.rotation);
             this.controls.target.copy(this.camera.position).add(forward.multiplyScalar(dist));
-            
             this.controls.update();
         } else {
-            tgt.position.set(px, py, pz);
-            tgt.rotation.set(rx, ry, rz);
-            if (s.type === 'character') {
-                tgt.scale.set(parseFloat(ui.sx.value)||1, parseFloat(ui.sy.value)||1, parseFloat(ui.sz.value)||1);
-            }
+            tgt.position.set(px, py, pz); tgt.rotation.set(rx, ry, rz);
+            if (s.type === 'character' || s.type === 'environment') tgt.scale.set(parseFloat(ui.sx.value)||1, parseFloat(ui.sy.value)||1, parseFloat(ui.sz.value)||1);
         }
     }
 
     refreshSidebarHighlights() {
-        if(this.uiCharList) Array.from(this.uiCharList.children).forEach(card => {
-            const isActive = this.selected.type === 'character' && card.dataset.id == this.selected.id;
-            card.style.borderColor = isActive ? "#00d2ff" : "#444";
-        });
-        if(this.uiLightList) Array.from(this.uiLightList.children).forEach(card => {
-            const isActive = this.selected.type === 'light' && card.dataset.id == this.selected.id;
-            card.style.borderColor = isActive ? "#00d2ff" : "#444";
-        });
-    }
-
-    // --- LIGHTING LOGIC ---
-    addLight(presetType = 'point') {
-        this.lightCounter++;
-        const id = this.lightCounter;
-        
-        const group = new this.THREE.Group();
-        group.position.set(0, 2, 2);
-
-        const lObj = { id, group, helper: null, light: null, type: presetType, color: '#ffffff', intensity: 1.0, range: 10, angle: 45, castShadow: true };
-        this.lights.push(lObj);
-        this.scene.add(group);
-        
-        this.updateLightType(lObj);
-        this.renderLightCards();
-    }
-
-    removeLight(id) {
-        const idx = this.lights.findIndex(l => l.id === id);
-        if (idx === -1) return;
-        const l = this.lights[idx];
-        if (this.selected.type === 'light' && this.selected.id === id) this.selectObject(null, null, null);
-        this.scene.remove(l.group);
-        this.lights.splice(idx, 1);
-        this.renderLightCards();
-    }
-
-    updateLightType(lObj) {
-        if (lObj.light) lObj.group.remove(lObj.light);
-        if (lObj.helper) lObj.group.remove(lObj.helper);
-        
-        const c = new this.THREE.Color(lObj.color);
-        switch(lObj.type) {
-            case 'ambient': lObj.light = new this.THREE.AmbientLight(c, lObj.intensity); break;
-            case 'directional': lObj.light = new this.THREE.DirectionalLight(c, lObj.intensity); break;
-            case 'point': lObj.light = new this.THREE.PointLight(c, lObj.intensity, lObj.range); break;
-            case 'spot': 
-                lObj.light = new this.THREE.SpotLight(c, lObj.intensity, lObj.range, this.THREE.MathUtils.degToRad(lObj.angle), 0.5, 1); 
-                break;
-        }
-
-        // Lock light targets to the group so they rotate seamlessly via TransformControls
-        if (lObj.type === 'directional' || lObj.type === 'spot') {
-            lObj.light.target.position.set(0, 0, -1);
-            lObj.group.add(lObj.light.target);
-        }
-
-        // Distinct Visual Helpers
-        const helperMat = new this.THREE.MeshBasicMaterial({color:0xffaa00, wireframe:true});
-        if (lObj.type === 'point') {
-            lObj.helper = new this.THREE.Mesh(new this.THREE.SphereGeometry(0.2, 8, 8), helperMat);
-        } else if (lObj.type === 'spot') {
-            lObj.helper = new this.THREE.Mesh(new this.THREE.ConeGeometry(0.3, 0.6, 8, 1, true), helperMat);
-            lObj.helper.rotation.x = Math.PI / 2; // Fixed: Opens down local -Z
-            lObj.helper.position.z = -0.3;
-        } else if (lObj.type === 'directional') {
-            lObj.helper = new this.THREE.Group();
-            const shaft = new this.THREE.Mesh(new this.THREE.CylinderGeometry(0.02, 0.02, 0.4), helperMat);
-            shaft.rotation.x = Math.PI / 2;
-            shaft.position.z = -0.2;
-            const head = new this.THREE.Mesh(new this.THREE.ConeGeometry(0.1, 0.2), helperMat);
-            head.rotation.x = -Math.PI / 2;
-            head.position.z = -0.5;
-            lObj.helper.add(shaft, head);
-        } else {
-            lObj.helper = new this.THREE.Group(); // Empty for ambient
-        }
-        
-        if (lObj.type !== 'ambient') {
-            lObj.light.castShadow = lObj.castShadow;
-            if (lObj.light.shadow) {
-                lObj.light.shadow.mapSize.width = 1024;
-                lObj.light.shadow.mapSize.height = 1024;
-            }
-        }
-        
-        lObj.group.add(lObj.light);
-        lObj.group.add(lObj.helper);
-        lObj.helper.visible = lObj.type !== 'ambient'; 
-    }
-
-    renderLightCards() {
-        this.uiLightList.innerHTML = "";
-        this.lights.forEach(l => {
-            const card = document.createElement("div");
-            card.dataset.id = l.id;
-            Object.assign(card.style, { background: "#222", border: "1px solid #444", borderRadius: "4px", padding: "6px" });
-            
-            const head = document.createElement("div");
-            head.style.display = "flex"; head.style.justifyContent = "space-between"; head.style.marginBottom = "4px";
-            
-            const selType = document.createElement("select");
-            Object.assign(selType.style, { background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "1px" });
-            ['ambient', 'directional', 'point', 'spot'].forEach(t => selType.add(new Option(t, t)));
-            selType.value = l.type;
-            selType.onchange = (e) => { l.type = e.target.value; this.updateLightType(l); this.renderLightCards(); };
-            
-            const actBox = document.createElement("div"); actBox.style.display = "flex"; actBox.style.gap = "4px";
-            const btnSel = document.createElement("button"); btnSel.innerText = "Select";
-            Object.assign(btnSel.style, { background: "#444", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px" });
-            btnSel.onclick = () => this.selectObject(l, 'light', l.id);
-            
-            const btnDel = document.createElement("button"); btnDel.innerText = "X";
-            Object.assign(btnDel.style, { background: "#622", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px" });
-            btnDel.onclick = () => this.removeLight(l.id);
-            
-            actBox.append(btnSel, btnDel);
-            head.append(selType, actBox);
-
-            // Controls Grid
-            const ctrls = document.createElement("div");
-            ctrls.style.display = "grid"; ctrls.style.gridTemplateColumns = "1fr 1fr"; ctrls.style.gap = "4px";
-            
-            const wrap = (lbl, elem) => {
-                const d = document.createElement("div"); d.style.display="flex"; d.style.alignItems="center"; d.style.gap="4px";
-                const s = document.createElement("span"); s.innerText = lbl; s.style.fontSize="9px"; s.style.color="#888"; s.style.width="20px";
-                d.append(s, elem); return d;
-            };
-
-            const inpCol = document.createElement("input"); inpCol.type = "color"; inpCol.value = l.color;
-            inpCol.style.width = "100%"; inpCol.style.height = "16px"; inpCol.style.padding = "0"; inpCol.style.border = "none";
-            inpCol.onchange = (e) => { l.color = e.target.value; this.updateLightType(l); };
-
-            const inpInt = document.createElement("input"); inpInt.type = "number"; inpInt.step = "0.1"; inpInt.value = l.intensity;
-            Object.assign(inpInt.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" });
-            inpInt.onchange = (e) => { l.intensity = parseFloat(e.target.value); this.updateLightType(l); };
-
-            ctrls.append(wrap("Col", inpCol), wrap("Int", inpInt));
-
-            if (l.type === 'point' || l.type === 'spot') {
-                const inpRng = document.createElement("input"); inpRng.type = "number"; inpRng.step = "1"; inpRng.value = l.range;
-                Object.assign(inpRng.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" });
-                inpRng.onchange = (e) => { l.range = parseFloat(e.target.value); this.updateLightType(l); };
-                ctrls.append(wrap("Rng", inpRng));
-            }
-
-            if (l.type === 'spot') {
-                const inpAng = document.createElement("input"); inpAng.type = "number"; inpAng.step = "1"; inpAng.value = l.angle;
-                Object.assign(inpAng.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" });
-                inpAng.onchange = (e) => { l.angle = parseFloat(e.target.value); this.updateLightType(l); };
-                ctrls.append(wrap("Ang", inpAng));
-            }
-
-            if (l.type !== 'ambient') {
-                const lblShad = document.createElement("label"); lblShad.style.fontSize="9px"; lblShad.style.color="#ccc"; lblShad.style.display="flex"; lblShad.style.gap="2px"; lblShad.style.alignItems="center";
-                const chkShad = document.createElement("input"); chkShad.type = "checkbox"; chkShad.checked = l.castShadow;
-                chkShad.onchange = (e) => { l.castShadow = e.target.checked; this.updateLightType(l); };
-                lblShad.append(chkShad, "Shadows");
-                ctrls.append(lblShad);
-            }
-
-            card.append(head, ctrls);
-            this.uiLightList.appendChild(card);
-        });
-        this.refreshSidebarHighlights();
-    }
-
-    // --- CHARACTER LOGIC ---
-    renderCharacterCards() {
-        this.uiCharList.innerHTML = "";
-        this.characters.forEach(c => {
-            const card = document.createElement("div");
-            card.dataset.id = c.id;
-            Object.assign(card.style, { background: "#222", border: "1px solid #444", borderRadius: "4px", padding: "6px" });
-            
-            const head = document.createElement("div");
-            head.style.display = "flex"; head.style.justifyContent = "space-between"; head.style.marginBottom = "2px";
-            head.innerHTML = `<span style="font-weight:bold; font-size:12px;">Char ${c.id}</span>`;
-            
-            const actBox = document.createElement("div"); actBox.style.display = "flex"; actBox.style.gap = "4px";
-            const btnSel = document.createElement("button"); btnSel.innerText = "Select";
-            Object.assign(btnSel.style, { background: "#444", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px" });
-            btnSel.onclick = () => this.selectObject(c, 'character', c.id);
-            
-            const btnDel = document.createElement("button"); btnDel.innerText = "X";
-            Object.assign(btnDel.style, { background: "#622", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px" });
-            btnDel.onclick = () => this.removeCharacter(c.id);
-            
-            actBox.append(btnSel, btnDel);
-            head.appendChild(actBox);
-            
-            // V9.7 Debug Info
-            const meshInfo = document.createElement("div");
-            meshInfo.style.fontSize = "9px";
-            meshInfo.style.color = "#888";
-            meshInfo.style.marginBottom = "4px";
-            meshInfo.innerText = `[M:${c.depthMeshesM.length} | F:${c.depthMeshesF.length} | Pose:${c.poseMeshes.length}]`;
-            
-            const selAnim = document.createElement("select");
-            Object.assign(selAnim.style, { width: "100%", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px", marginBottom: "4px" });
-            this.availableAnimations.forEach(anim => selAnim.add(new Option(anim, anim)));
-            selAnim.value = c.animFile;
-            selAnim.onchange = (e) => this.loadAnimationForChar(c, e.target.value);
-            
-            const foot = document.createElement("div"); foot.style.display = "flex"; foot.style.justifyContent = "space-between"; foot.style.alignItems = "center";
-            
-            // Loop & Gender Box
-            const loopBox = document.createElement("div");
-            loopBox.style.display = "flex"; loopBox.style.alignItems = "center"; loopBox.style.gap = "6px";
-            
-            const btnGender = document.createElement("button");
-            btnGender.innerText = c.gender;
-            Object.assign(btnGender.style, {
-                background: "#111", border: "1px solid #444", borderRadius: "3px", 
-                cursor: "pointer", fontSize: "10px", padding: "1px 6px", fontWeight: "bold",
-                color: c.gender === 'F' ? '#ff66b2' : '#66b2ff'
+        const resetStyles = (list, type) => {
+            if(list) Array.from(list.children).forEach(card => {
+                const isActive = this.selected.type === type && card.dataset.id == this.selected.id;
+                card.style.borderColor = isActive ? "#00d2ff" : "#444";
             });
-            btnGender.onclick = () => {
-                c.gender = c.gender === 'M' ? 'F' : 'M';
-                btnGender.innerText = c.gender;
-                btnGender.style.color = c.gender === 'F' ? '#ff66b2' : '#66b2ff';
-                this.updateVisibilities();
-            };
-
-            const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px";
-            const chkLoop = document.createElement("input"); chkLoop.type = "checkbox"; chkLoop.checked = c.loop;
-            chkLoop.onchange = (e) => { c.loop = e.target.checked; if(c.action) { c.action.setLoop(c.loop ? this.THREE.LoopRepeat : this.THREE.LoopOnce); c.action.clampWhenFinished = !c.loop; }};
-            lblLoop.append(chkLoop, "Loop");
-            
-            loopBox.append(btnGender, lblLoop);
-
-            const lblDur = document.createElement("span");
-            const fps = this.getWidgetValue("fps", 24);
-            lblDur.innerText = c.duration > 0 ? `${Math.floor(c.duration * fps)}f` : "--";
-            lblDur.id = `dur-${c.id}`;
-            lblDur.style.color = "#888"; lblDur.style.fontFamily = "monospace";
-            
-            foot.append(loopBox, lblDur);
-            card.append(head, meshInfo, selAnim, foot);
-            this.uiCharList.appendChild(card);
-        });
-        this.refreshSidebarHighlights();
+        };
+        resetStyles(this.uiCharList, 'character');
+        resetStyles(this.uiEnvList, 'environment');
+        resetStyles(this.uiLightList, 'light');
     }
 
-    // --- CORE LOGIC ---
+    // --- LOGIC: DATA FETCHING ---
     async fetchAnimations() {
         try {
             const res = await api.fetchApi("/yedp/get_animations");
             const data = await res.json();
-            if (data.files && data.files.length > 0) {
-                // Ensure 'none' is always available to prevent UI default mismatches
-                this.availableAnimations = ["none", ...data.files.filter(f => f !== "none")];
-            }
+            if (data.files && data.files.length > 0) this.availableAnimations = ["none", ...data.files.filter(f => f !== "none")];
         } catch(e) { console.error("Failed to fetch animations."); }
+    }
+
+    async fetchEnvs() {
+        try {
+            const res = await api.fetchApi("/yedp/get_envs");
+            const data = await res.json();
+            if (data.files && data.files.length > 0) this.availableEnvs = ["none", ...data.files.filter(f => f !== "none")];
+        } catch(e) { console.error("Failed to fetch envs."); }
+    }
+
+    async fetchCams() {
+        try {
+            const res = await api.fetchApi("/yedp/get_cams");
+            const data = await res.json();
+            if (data.files && data.files.length > 0) this.availableCams = ["none", ...data.files.filter(f => f !== "none")];
+        } catch(e) { console.error("Failed to fetch cams."); }
     }
 
     async loadBaseRig() {
         const loader = new this.GLTFLoaderClass();
-        // V9.8 FIX: Cache Buster. Appending the current timestamp forces the browser 
-        // to bypass the local cache and download the absolute newest version of your GLB.
         const rigUrl = new URL(`../Yedp_Rig.glb?t=${Date.now()}`, this.baseUrl).href;
         console.log("[Yedp] Loading Base Rig from:", rigUrl);
         const gltf = await loader.loadAsync(rigUrl);
@@ -1261,25 +1359,350 @@ class YedpViewport {
             }
         });
         
-        // Spawn first character automatically
-        this.addCharacter();
+        // Add defaults only if we aren't loading a saved scene
+        if (!this.node.saved_scene_state) {
+            this.addCharacter();
+        }
+    }
+
+    // --- LOGIC: CAMERA ANIM ---
+    async loadCameraAnim(filename) {
+        if(!filename || filename === "none") {
+            this.cameraMixer?.stopAllAction();
+            this.cameraAction = null;
+            this.cameraAnimNode = null;
+            this.forceUpdateFrame();
+            return;
+        }
+        const isFBX = filename.toLowerCase().endsWith(".fbx");
+        const url = `/view?filename=${filename}&type=input&subfolder=yedp_cams&t=${Date.now()}`;
+        try {
+            const model = isFBX ? await new this.FBXLoader().loadAsync(url) : await new this.GLTFLoaderClass().loadAsync(url);
+            let clip = isFBX ? model.animations?.[0] : (model.animations?.[0] || model.scene?.animations?.[0] || model.asset?.animations?.[0]);
+            
+            if (clip) {
+                this.cameraAnimGroup.clear();
+                let animTarget = model.scene || model;
+                
+                this.cameraAnimGroup.add(animTarget);
+                this.cameraMixer = new this.THREE.AnimationMixer(animTarget);
+                this.cameraAction = this.cameraMixer.clipAction(clip);
+                this.cameraAction.play();
+                
+                this.cameraAnimNode = animTarget.getObjectByProperty('isCamera', true) || animTarget;
+                console.log("[Yedp] Bound custom animated camera tracking to:", this.cameraAnimNode.name);
+                this.forceUpdateFrame();
+            }
+        } catch(e) { console.error("Camera Anim Load Error:", e); }
+    }
+
+    // --- LOGIC: LIGHTING ---
+    addLight(presetType = 'point') {
+        this.lightCounter++;
+        const id = this.lightCounter;
+        const group = new this.THREE.Group(); group.position.set(0, 2, 2);
+        const lObj = { id, group, helper: null, light: null, type: presetType, color: '#ffffff', intensity: 1.0, range: 10, angle: 45, castShadow: true };
+        this.lights.push(lObj);
+        this.scene.add(group);
+        this.updateLightType(lObj);
+        this.renderLightCards();
+    }
+    removeLight(id) {
+        const idx = this.lights.findIndex(l => l.id === id);
+        if (idx === -1) return;
+        const l = this.lights[idx];
+        if (this.selected.type === 'light' && this.selected.id === id) this.selectObject(null, null, null);
+        this.scene.remove(l.group);
+        this.lights.splice(idx, 1);
+        this.renderLightCards();
+    }
+    updateLightType(lObj) {
+        if (lObj.light) lObj.group.remove(lObj.light);
+        if (lObj.helper) lObj.group.remove(lObj.helper);
+        const c = new this.THREE.Color(lObj.color);
+        switch(lObj.type) {
+            case 'ambient': lObj.light = new this.THREE.AmbientLight(c, lObj.intensity); break;
+            case 'directional': lObj.light = new this.THREE.DirectionalLight(c, lObj.intensity); break;
+            case 'point': lObj.light = new this.THREE.PointLight(c, lObj.intensity, lObj.range); break;
+            case 'spot': lObj.light = new this.THREE.SpotLight(c, lObj.intensity, lObj.range, this.THREE.MathUtils.degToRad(lObj.angle), 0.5, 1); break;
+        }
+        if (lObj.type === 'directional' || lObj.type === 'spot') {
+            lObj.light.target.position.set(0, 0, -1); lObj.group.add(lObj.light.target);
+        }
+        const helperMat = new this.THREE.MeshBasicMaterial({color:0xffaa00, wireframe:true});
+        if (lObj.type === 'point') lObj.helper = new this.THREE.Mesh(new this.THREE.SphereGeometry(0.2, 8, 8), helperMat);
+        else if (lObj.type === 'spot') {
+            lObj.helper = new this.THREE.Mesh(new this.THREE.ConeGeometry(0.3, 0.6, 8, 1, true), helperMat);
+            lObj.helper.rotation.x = Math.PI / 2; lObj.helper.position.z = -0.3;
+        } else if (lObj.type === 'directional') {
+            lObj.helper = new this.THREE.Group();
+            const shaft = new this.THREE.Mesh(new this.THREE.CylinderGeometry(0.02, 0.02, 0.4), helperMat);
+            shaft.rotation.x = Math.PI / 2; shaft.position.z = -0.2;
+            const head = new this.THREE.Mesh(new this.THREE.ConeGeometry(0.1, 0.2), helperMat);
+            head.rotation.x = -Math.PI / 2; head.position.z = -0.5;
+            lObj.helper.add(shaft, head);
+        } else lObj.helper = new this.THREE.Group();
+        
+        if (lObj.type !== 'ambient') {
+            lObj.light.castShadow = lObj.castShadow;
+            if (lObj.light.shadow) { lObj.light.shadow.mapSize.width = 1024; lObj.light.shadow.mapSize.height = 1024; }
+        }
+        lObj.group.add(lObj.light); lObj.group.add(lObj.helper);
+        lObj.helper.visible = lObj.type !== 'ambient'; 
+        this.forceUpdateFrame();
+    }
+    renderLightCards() {
+        this.uiLightList.innerHTML = "";
+        this.lights.forEach(l => {
+            const card = document.createElement("div"); card.dataset.id = l.id;
+            Object.assign(card.style, { background: "#222", border: "1px solid #444", borderRadius: "4px", padding: "6px", cursor: "pointer", transition: "border-color 0.2s" });
+            
+            card.onclick = (e) => {
+                if (['button', 'input', 'select', 'option'].includes(e.target.tagName.toLowerCase())) return;
+                this.selectObject(l, 'light', l.id);
+            };
+
+            const head = document.createElement("div"); head.style.display = "flex"; head.style.justifyContent = "space-between"; head.style.marginBottom = "4px";
+            const selType = document.createElement("select");
+            Object.assign(selType.style, { background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "1px" });
+            ['ambient', 'directional', 'point', 'spot'].forEach(t => selType.add(new Option(t, t)));
+            selType.value = l.type; selType.onchange = (e) => { l.type = e.target.value; this.updateLightType(l); this.renderLightCards(); };
+            
+            const btnDel = document.createElement("button"); btnDel.innerText = "X"; Object.assign(btnDel.style, { background: "#622", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px" }); btnDel.onclick = () => this.removeLight(l.id);
+            head.append(selType, btnDel);
+
+            const ctrls = document.createElement("div"); ctrls.style.display = "grid"; ctrls.style.gridTemplateColumns = "1fr 1fr"; ctrls.style.gap = "4px";
+            const wrap = (lbl, elem) => { const d = document.createElement("div"); d.style.display="flex"; d.style.alignItems="center"; d.style.gap="4px"; const s = document.createElement("span"); s.innerText = lbl; s.style.fontSize="9px"; s.style.color="#888"; s.style.width="20px"; d.append(s, elem); return d; };
+
+            const inpCol = document.createElement("input"); inpCol.type = "color"; inpCol.value = l.color; inpCol.style.width = "100%"; inpCol.style.height = "16px"; inpCol.style.padding = "0"; inpCol.style.border = "none"; inpCol.onchange = (e) => { l.color = e.target.value; this.updateLightType(l); };
+            const inpInt = document.createElement("input"); inpInt.type = "number"; inpInt.step = "0.1"; inpInt.value = l.intensity; Object.assign(inpInt.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" }); inpInt.onchange = (e) => { l.intensity = parseFloat(e.target.value); this.updateLightType(l); };
+            ctrls.append(wrap("Col", inpCol), wrap("Int", inpInt));
+
+            if (l.type === 'point' || l.type === 'spot') {
+                const inpRng = document.createElement("input"); inpRng.type = "number"; inpRng.step = "1"; inpRng.value = l.range; Object.assign(inpRng.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" }); inpRng.onchange = (e) => { l.range = parseFloat(e.target.value); this.updateLightType(l); }; ctrls.append(wrap("Rng", inpRng));
+            }
+            if (l.type === 'spot') {
+                const inpAng = document.createElement("input"); inpAng.type = "number"; inpAng.step = "1"; inpAng.value = l.angle; Object.assign(inpAng.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" }); inpAng.onchange = (e) => { l.angle = parseFloat(e.target.value); this.updateLightType(l); }; ctrls.append(wrap("Ang", inpAng));
+            }
+            if (l.type !== 'ambient') {
+                const lblShad = document.createElement("label"); lblShad.style.fontSize="9px"; lblShad.style.color="#ccc"; lblShad.style.display="flex"; lblShad.style.gap="2px"; lblShad.style.alignItems="center";
+                const chkShad = document.createElement("input"); chkShad.type = "checkbox"; chkShad.checked = l.castShadow; chkShad.onchange = (e) => { l.castShadow = e.target.checked; this.updateLightType(l); };
+                lblShad.append(chkShad, "Shadows"); ctrls.append(lblShad);
+            }
+            card.append(head, ctrls); this.uiLightList.appendChild(card);
+        });
+        this.refreshSidebarHighlights();
+    }
+
+    // --- LOGIC: ENVIRONMENTS ---
+    addEnvironment() {
+        this.envCounter++;
+        const newEnv = new EnvironmentInstance(this.envCounter, this.THREE);
+        this.scene.add(newEnv.group);
+        this.environments.push(newEnv);
+        this.renderEnvironmentCards();
+    }
+
+    removeEnvironment(id) {
+        const idx = this.environments.findIndex(e => e.id === id);
+        if (idx === -1) return;
+        const e = this.environments[idx];
+        if (this.selected.type === 'environment' && this.selected.id === id) this.selectObject(null, null, null);
+        e.destroy(this.scene);
+        this.environments.splice(idx, 1);
+        this.renderEnvironmentCards();
+    }
+
+    async loadEnvironmentFile(envObj, filename) {
+        const info = this.container.querySelector(`#env-mesh-info-${envObj.id}`);
+        if(info) info.innerText = `[Loading...]`;
+
+        if(!filename || filename === "none") {
+            envObj.group.clear();
+            envObj.meshes = [];
+            envObj.mixer.stopAllAction();
+            envObj.action = null;
+            if(info) info.innerText = `[Meshes: 0]`;
+            this.forceUpdateFrame();
+            return;
+        }
+        envObj.envFile = filename;
+        const isFBX = filename.toLowerCase().endsWith(".fbx");
+        const url = `/view?filename=${filename}&type=input&subfolder=yedp_envs&t=${Date.now()}`;
+        try {
+            const model = isFBX ? await new this.FBXLoader().loadAsync(url) : await new this.GLTFLoaderClass().loadAsync(url);
+            
+            envObj.group.clear();
+            envObj.meshes = [];
+            
+            let targetObj = isFBX ? model : model.scene;
+            envObj.group.add(targetObj);
+            
+            targetObj.traverse((child) => {
+                child.visible = true; // Force all nested groups to be visible
+                if(child.isMesh || child.isSkinnedMesh || child.type === 'Mesh' || child.type === 'SkinnedMesh') {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                    child.frustumCulled = false; 
+                    
+                    if (child.material) {
+                        const fixMat = (mat) => {
+                            if (mat.transparent && mat.opacity < 0.01) {
+                                mat.transparent = false;
+                                mat.opacity = 1.0;
+                            }
+                            mat.side = this.THREE.DoubleSide; 
+                        };
+                        if (Array.isArray(child.material)) child.material.forEach(fixMat);
+                        else fixMat(child.material);
+                    }
+                    
+                    envObj.meshes.push(child);
+                    if(!this.originalMaterials.has(child)) this.originalMaterials.set(child, child.material);
+                }
+            });
+            
+            if(info) info.innerText = `[Meshes: ${envObj.meshes.length}]`;
+
+            let clip = isFBX ? model.animations?.[0] : (model.animations?.[0] || model.scene?.animations?.[0] || model.asset?.animations?.[0]);
+            if(clip) {
+                envObj.mixer = new this.THREE.AnimationMixer(targetObj);
+                envObj.action = envObj.mixer.clipAction(clip);
+                envObj.action.setLoop(envObj.loop ? this.THREE.LoopRepeat : this.THREE.LoopOnce);
+                envObj.action.clampWhenFinished = !envObj.loop;
+                envObj.action.reset().setEffectiveWeight(1).play();
+                envObj.duration = clip.duration;
+            } else {
+                envObj.action = null;
+                envObj.duration = 0;
+            }
+            
+            const lbl = this.container.querySelector(`#env-dur-${envObj.id}`);
+            if (lbl) {
+                const fps = this.getWidgetValue("fps", 24);
+                lbl.innerText = envObj.duration > 0 ? `${Math.floor(envObj.duration * fps)}f` : "Static";
+            }
+            
+            this.updateVisibilities();
+            this.forceUpdateFrame();
+
+        } catch(e) { 
+            console.error("Env Load Error:", e); 
+            envObj.group.clear();
+            if(info) info.innerHTML = `<span style="color:red;">[Load Error]</span>`;
+        }
+    }
+
+    renderEnvironmentCards() {
+        this.uiEnvList.innerHTML = "";
+        this.environments.forEach(e => {
+            const card = document.createElement("div"); card.dataset.id = e.id;
+            Object.assign(card.style, { background: "#222", border: "1px solid #444", borderRadius: "4px", padding: "6px", cursor: "pointer", transition: "border-color 0.2s" });
+            
+            card.onclick = (evt) => {
+                if (['button', 'input', 'select', 'option'].includes(evt.target.tagName.toLowerCase())) return;
+                this.selectObject(e, 'environment', e.id);
+            };
+
+            const head = document.createElement("div"); head.style.display = "flex"; head.style.justifyContent = "space-between"; head.style.marginBottom = "2px";
+            head.innerHTML = `<span style="font-weight:bold; font-size:12px;">Env ${e.id}</span>`;
+            
+            const btnDel = document.createElement("button"); btnDel.innerText = "X"; Object.assign(btnDel.style, { background: "#622", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px" }); btnDel.onclick = () => this.removeEnvironment(e.id);
+            head.appendChild(btnDel);
+            
+            const meshInfo = document.createElement("div");
+            meshInfo.style.fontSize = "9px";
+            meshInfo.style.color = "#888";
+            meshInfo.style.marginBottom = "4px";
+            meshInfo.id = `env-mesh-info-${e.id}`;
+            meshInfo.innerText = `[Meshes: ${e.meshes.length}]`;
+            
+            const selEnv = document.createElement("select");
+            Object.assign(selEnv.style, { width: "100%", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px", marginBottom: "4px" });
+            this.availableEnvs.forEach(env => selEnv.add(new Option(env, env)));
+            selEnv.value = e.envFile;
+            selEnv.onchange = (evt) => this.loadEnvironmentFile(e, evt.target.value);
+
+            const foot = document.createElement("div"); foot.style.display = "flex"; foot.style.justifyContent = "space-between"; foot.style.alignItems = "center";
+            const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px";
+            const chkLoop = document.createElement("input"); chkLoop.type = "checkbox"; chkLoop.checked = e.loop;
+            chkLoop.onchange = (evt) => { e.loop = evt.target.checked; if(e.action) { e.action.setLoop(e.loop ? this.THREE.LoopRepeat : this.THREE.LoopOnce); e.action.clampWhenFinished = !e.loop; }};
+            lblLoop.append(chkLoop, "Loop (Anim)");
+            
+            const lblDur = document.createElement("span");
+            const fps = this.getWidgetValue("fps", 24);
+            lblDur.innerText = e.duration > 0 ? `${Math.floor(e.duration * fps)}f` : "Static";
+            lblDur.id = `env-dur-${e.id}`; lblDur.style.color = "#888"; lblDur.style.fontFamily = "monospace";
+            
+            foot.append(lblLoop, lblDur);
+            card.append(head, meshInfo, selEnv, foot);
+            this.uiEnvList.appendChild(card);
+        });
+        this.refreshSidebarHighlights();
+    }
+
+    // --- LOGIC: CHARACTERS ---
+    renderCharacterCards() {
+        this.uiCharList.innerHTML = "";
+        this.characters.forEach(c => {
+            const card = document.createElement("div"); card.dataset.id = c.id;
+            Object.assign(card.style, { background: "#222", border: "1px solid #444", borderRadius: "4px", padding: "6px", cursor: "pointer", transition: "border-color 0.2s" });
+            
+            card.onclick = (evt) => {
+                if (['button', 'input', 'select', 'option'].includes(evt.target.tagName.toLowerCase())) return;
+                this.selectObject(c, 'character', c.id);
+            };
+
+            const head = document.createElement("div"); head.style.display = "flex"; head.style.justifyContent = "space-between"; head.style.marginBottom = "2px";
+            head.innerHTML = `<span style="font-weight:bold; font-size:12px;">Char ${c.id}</span>`;
+            
+            const btnDel = document.createElement("button"); btnDel.innerText = "X"; Object.assign(btnDel.style, { background: "#622", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px" }); btnDel.onclick = () => this.removeCharacter(c.id);
+            head.appendChild(btnDel);
+            
+            const meshInfo = document.createElement("div");
+            meshInfo.style.fontSize = "9px";
+            meshInfo.style.color = "#888";
+            meshInfo.style.marginBottom = "4px";
+            meshInfo.innerText = `[M:${c.depthMeshesM.length} | F:${c.depthMeshesF.length} | Pose:${c.poseMeshes.length}]`;
+            
+            const selAnim = document.createElement("select");
+            Object.assign(selAnim.style, { width: "100%", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px", marginBottom: "4px" });
+            this.availableAnimations.forEach(anim => selAnim.add(new Option(anim, anim)));
+            selAnim.value = c.animFile; selAnim.onchange = (e) => this.loadAnimationForChar(c, e.target.value);
+            
+            const foot = document.createElement("div"); foot.style.display = "flex"; foot.style.justifyContent = "space-between"; foot.style.alignItems = "center";
+            const loopBox = document.createElement("div"); loopBox.style.display = "flex"; loopBox.style.alignItems = "center"; loopBox.style.gap = "6px";
+            
+            const btnGender = document.createElement("button"); btnGender.innerText = c.gender;
+            Object.assign(btnGender.style, { background: "#111", border: "1px solid #444", borderRadius: "3px", cursor: "pointer", fontSize: "10px", padding: "1px 6px", fontWeight: "bold", color: c.gender === 'F' ? '#ff66b2' : '#66b2ff' });
+            btnGender.onclick = () => { c.gender = c.gender === 'M' ? 'F' : 'M'; btnGender.innerText = c.gender; btnGender.style.color = c.gender === 'F' ? '#ff66b2' : '#66b2ff'; this.updateVisibilities(); this.forceUpdateFrame(); };
+
+            const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px";
+            const chkLoop = document.createElement("input"); chkLoop.type = "checkbox"; chkLoop.checked = c.loop;
+            chkLoop.onchange = (e) => { c.loop = e.target.checked; if(c.action) { c.action.setLoop(c.loop ? this.THREE.LoopRepeat : this.THREE.LoopOnce); c.action.clampWhenFinished = !c.loop; }};
+            lblLoop.append(chkLoop, "Loop"); loopBox.append(btnGender, lblLoop);
+
+            const lblDur = document.createElement("span");
+            const fps = this.getWidgetValue("fps", 24);
+            lblDur.innerText = c.duration > 0 ? `${Math.floor(c.duration * fps)}f` : "--";
+            lblDur.id = `dur-${c.id}`; lblDur.style.color = "#888"; lblDur.style.fontFamily = "monospace";
+            
+            foot.append(loopBox, lblDur); card.append(head, meshInfo, selAnim, foot); this.uiCharList.appendChild(card);
+        });
+        this.refreshSidebarHighlights();
     }
 
     addCharacter() {
         if (this.characters.length >= 16) { alert("Maximum 16 characters recommended for WebGL performance."); return; }
         this.charCounter++;
         const newChar = new CharacterInstance(this.charCounter, this.baseRig, this.THREE);
-        
-        this.scene.add(newChar.scene);
-        this.scene.add(newChar.skeletonHelper);
+        this.scene.add(newChar.scene); this.scene.add(newChar.skeletonHelper);
         this.characters.push(newChar);
 
-        // Cache original materials
         newChar.depthMeshesM.forEach(m => { if(m.isMesh && !this.originalMaterials.has(m)) this.originalMaterials.set(m, m.material); });
         newChar.depthMeshesF.forEach(m => { if(m.isMesh && !this.originalMaterials.has(m)) this.originalMaterials.set(m, m.material); });
 
-        this.updateVisibilities();
-        this.renderCharacterCards();
+        this.updateVisibilities(); this.renderCharacterCards();
     }
 
     removeCharacter(id) {
@@ -1287,17 +1710,26 @@ class YedpViewport {
         if (idx === -1) return;
         const c = this.characters[idx];
         if (this.selected.type === 'character' && this.selected.id === id) this.selectObject(null, null, null);
-        c.destroy(this.scene);
-        this.characters.splice(idx, 1);
+        c.destroy(this.scene); this.characters.splice(idx, 1);
         this.renderCharacterCards();
     }
 
     async loadAnimationForChar(charObj, filename) {
-        if(!filename || filename === "none") return;
+        const lbl = this.container.querySelector(`#dur-${charObj.id}`);
+        if (lbl) lbl.innerText = "Loading...";
+
+        if(!filename || filename === "none") {
+            charObj.animFile = filename;
+            charObj.mixer.stopAllAction();
+            charObj.action = null;
+            if (lbl) lbl.innerText = "--";
+            this.forceUpdateFrame();
+            return;
+        }
+        
         charObj.animFile = filename;
         const isFBX = filename.toLowerCase().endsWith(".fbx");
         const isBVH = filename.toLowerCase().endsWith(".bvh");
-        // V9.8 FIX: Cache Buster for animations too, just in case you overwrite an FBX.
         const url = `/view?filename=${filename}&type=input&subfolder=yedp_anims&t=${Date.now()}`;
         
         try {
@@ -1315,50 +1747,72 @@ class YedpViewport {
                     const prop = t.name.substring(lastDot + 1);
                     const fullBonePath = t.name.substring(0, lastDot);
                     const normalizedTrackBone = semanticNormalize(fullBonePath);
-                    
                     if (prop === "scale") return; 
-
                     if(this.semanticMap.has(normalizedTrackBone)) {
-                        const targetRealName = this.semanticMap.get(normalizedTrackBone);
                         const tc = t.clone(); 
-                        
-                        // V9.9 FIX: Removed completely the aggressive positional override.
-                        // Root motions, jumps, and world-space paths are now perfectly preserved!
-                        tc.name = `${targetRealName}.${prop}`;
+                        tc.name = `${this.semanticMap.get(normalizedTrackBone)}.${prop}`;
                         tracks.push(tc);
                     }
                 });
 
                 const cleanClip = new this.THREE.AnimationClip(clip.name, clip.duration, tracks);
-                charObj.mixer.stopAllAction();
-                charObj.mixer.uncacheRoot(charObj.scene);
+                charObj.mixer.stopAllAction(); charObj.mixer.uncacheRoot(charObj.scene);
                 
                 charObj.action = charObj.mixer.clipAction(cleanClip);
                 charObj.action.setLoop(charObj.loop ? this.THREE.LoopRepeat : this.THREE.LoopOnce);
                 charObj.action.clampWhenFinished = !charObj.loop;
                 charObj.action.reset().setEffectiveWeight(1).play();
-                charObj.mixer.update(0); 
-
                 charObj.duration = cleanClip.duration;
                 
-                // Update label dynamically using the container scope to ensure accuracy
-                const lbl = this.container.querySelector(`#dur-${charObj.id}`);
-                if (lbl) {
-                    const fps = this.getWidgetValue("fps", 24);
-                    lbl.innerText = `${Math.floor(charObj.duration * fps)}f`;
-                }
+                if (lbl) lbl.innerText = `${Math.floor(charObj.duration * this.getWidgetValue("fps", 24))}f`;
                 
-                this.isPlaying = true;
-                const btn = this.container.querySelector("#btn-play");
-                if(btn) btn.innerText = "⏸";
+                this.isPlaying = true; const btn = this.container.querySelector("#btn-play"); if(btn) btn.innerText = "⏸";
+                this.forceUpdateFrame();
             }
-        } catch(e) { console.error("Anim Load Error:", e); }
+        } catch(e) { 
+            console.error("Anim Load Error:", e); 
+            if (lbl) lbl.innerHTML = `<span style="color:red;">Error</span>`;
+        }
     }
 
     applyCameraKeyframes(timeRatio) {
+        if (this.cameraAnimNode && this.cameraAction) {
+            this.cameraAnimGroup.updateMatrixWorld(true);
+            
+            const worldPos = new this.THREE.Vector3();
+            const worldQuat = new this.THREE.Quaternion();
+            this.cameraAnimNode.getWorldPosition(worldPos);
+            this.cameraAnimNode.getWorldQuaternion(worldQuat);
+
+            const eulerOffset = new this.THREE.Euler(
+                this.THREE.MathUtils.degToRad(this.camOverrideOffset.rx),
+                this.THREE.MathUtils.degToRad(this.camOverrideOffset.ry),
+                this.THREE.MathUtils.degToRad(this.camOverrideOffset.rz),
+                'XYZ'
+            );
+            const quatOffset = new this.THREE.Quaternion().setFromEuler(eulerOffset);
+            worldQuat.multiply(quatOffset);
+
+            this.importedCamProxy.visible = !this.isCameraOverride && !this.isBaking;
+            if (!this.isCameraOverride) {
+                this.importedCamProxy.position.copy(worldPos);
+                this.importedCamProxy.quaternion.copy(worldQuat);
+            }
+
+            if (this.isCameraOverride) {
+                this.camera.position.copy(worldPos);
+                this.camera.quaternion.copy(worldQuat);
+                
+                const forward = new this.THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+                this.controls.target.copy(this.camera.position).add(forward.multiplyScalar(5.0));
+                
+                if (this.selected.type === 'camera') this.updateTransformUIFromObject();
+                return;
+            }
+        }
+
         if (!this.camKeys.start || !this.camKeys.end) return;
         let t = timeRatio;
-        // Easing functions
         if (this.camKeys.ease === 'easeIn') t = t * t;
         else if (this.camKeys.ease === 'easeOut') t = t * (2 - t);
         else if (this.camKeys.ease === 'easeInOut') t = t < .5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
@@ -1366,13 +1820,10 @@ class YedpViewport {
         this.camera.position.lerpVectors(this.camKeys.start.pos, this.camKeys.end.pos, t);
         this.camera.quaternion.slerpQuaternions(this.camKeys.start.quat, this.camKeys.end.quat, t);
         
-        // Fixed: Lerp OrbitControls zoom state for orthographic dolly support
         if (this.camKeys.start.zoom !== undefined && this.camKeys.end.zoom !== undefined) {
             this.camera.zoom = this.camKeys.start.zoom + (this.camKeys.end.zoom - this.camKeys.start.zoom) * t;
             this.camera.updateProjectionMatrix();
         }
-
-        // Fixed: Lerp OrbitControls target for panning translation
         if (this.controls && this.camKeys.start.target && this.camKeys.end.target) {
             this.controls.target.lerpVectors(this.camKeys.start.target, this.camKeys.end.target, t);
         }
@@ -1390,38 +1841,19 @@ class YedpViewport {
         const fps = this.getWidgetValue("fps", 24);
 
         if (this.isPlaying) {
-            // V9.9 FIX: Use decoupled internal time to prevent slider truncation logic.
-            // This allows the animation to play perfectly smoothly regardless of fractional FPS steps.
             this.globalTime += delta;
             const totalDuration = totalFrames / fps;
-            
-            // Global Loop
-            if (this.globalTime >= totalDuration) {
-                this.globalTime = this.globalTime % totalDuration; 
-            }
+            if (this.globalTime >= totalDuration) this.globalTime = this.globalTime % totalDuration; 
             
             const currentFrame = Math.floor(this.globalTime * fps);
             
-            // Only update the slider visuals without triggering a fractional math error
             const slider = this.container.querySelector("#t-slider");
-            if (slider && !this.isDraggingSlider) {
-                slider.value = currentFrame;
-            }
+            if (slider && !this.isDraggingSlider) slider.value = currentFrame;
             
             const timeLabel = this.container.querySelector("#t-time");
-            if (timeLabel) {
-                timeLabel.innerText = `${currentFrame} / ${totalFrames}`;
-            }
+            if (timeLabel) timeLabel.innerText = `${currentFrame} / ${totalFrames}`;
 
-            const t = this.globalTime;
-            
-            this.characters.forEach(c => {
-                if(c.action && c.duration > 0) {
-                    c.action.time = c.loop ? (t % c.duration) : Math.min(t, c.duration);
-                    c.mixer.update(0); // strict evaluate
-                }
-            });
-
+            this.evaluateAnimations(this.globalTime);
             this.applyCameraKeyframes(currentFrame / Math.max(1, totalFrames - 1));
         }
         
@@ -1435,41 +1867,37 @@ class YedpViewport {
 
         this.characters.forEach(c => {
             c.inactiveDepthMeshes.forEach(m => m.visible = false);
-            
             const showDepthMeshes = isDepth || isShaded;
             c.activeDepthMeshes.forEach(m => {
                 m.visible = showDepthMeshes;
-                if (isDepth) {
-                    m.material = this.depthMat;
-                } else if (isShaded) {
-                    m.material = this.shadedMat;
-                } else {
-                    m.material = this.originalMaterials.get(m) || m.material;
-                }
+                if (isDepth) m.material = m.isSkinnedMesh ? this.matsSkinned.depth : this.matsStatic.depth;
+                else if (isShaded) m.material = m.isSkinnedMesh ? this.matsSkinned.shaded : this.matsStatic.shaded;
+                else m.material = this.originalMaterials.get(m) || m.material;
             });
+            c.poseMeshes.forEach(m => m.visible = !showDepthMeshes);
+        });
 
-            c.poseMeshes.forEach(m => {
-                m.visible = !showDepthMeshes;
+        this.environments.forEach(e => {
+            e.meshes.forEach(m => {
+                m.visible = true; 
+                if (isDepth) m.material = m.isSkinnedMesh ? this.matsSkinned.depth : this.matsStatic.depth;
+                else if (isShaded) m.material = m.isSkinnedMesh ? this.matsSkinned.shaded : this.matsStatic.shaded;
+                else m.material = this.originalMaterials.get(m) || m.material;
             });
         });
 
-        if (isDepth) {
-            this.updateCameraBounds();
-        } else {
-            this.resetCamera();
-        }
+        if (isDepth) this.updateCameraBounds();
+        else this.resetCamera();
     }
 
     updateCameraBounds() {
         if(!this.camera) return;
-        this.camera.near = Math.max(0.01, this.userNear);
-        this.camera.far = Math.max(0.1, this.userFar);
+        this.camera.near = Math.max(0.01, this.userNear); this.camera.far = Math.max(0.1, this.userFar);
         this.camera.updateProjectionMatrix();
     }
     resetCamera() {
         if(!this.camera) return;
-        this.camera.near = this.defaultNear;
-        this.camera.far = this.defaultFar;
+        this.camera.near = this.defaultNear; this.camera.far = this.defaultFar;
         this.camera.updateProjectionMatrix();
     }
 
@@ -1477,64 +1905,37 @@ class YedpViewport {
         const updateDim = (w, val) => {
             if(w && w.name === "width") this.renderWidth = val; 
             else if(w && w.name === "height") this.renderHeight = val;
-            
             const lbl = this.container.querySelector("#lbl-res");
             if(lbl) lbl.innerText = `${this.renderWidth}x${this.renderHeight}`;
             this.onResize(this.container.querySelector(".yedp-vp-area"));
         };
-
         const wWidget = this.node.widgets?.find(w => w.name === "width");
         const hWidget = this.node.widgets?.find(w => w.name === "height");
-        
-        if(wWidget) { 
-            this.renderWidth = wWidget.value; 
-            const orig = wWidget.callback; 
-            wWidget.callback = v => { updateDim(wWidget, v); if(orig) orig(v); };
-        }
-        
-        if(hWidget) { 
-            this.renderHeight = hWidget.value; 
-            const orig = hWidget.callback; 
-            hWidget.callback = v => { updateDim(hWidget, v); if(orig) orig(v); };
-        }
-        
+        if(wWidget) { this.renderWidth = wWidget.value; const orig = wWidget.callback; wWidget.callback = v => { updateDim(wWidget, v); if(orig) orig(v); }; }
+        if(hWidget) { this.renderHeight = hWidget.value; const orig = hWidget.callback; hWidget.callback = v => { updateDim(hWidget, v); if(orig) orig(v); }; }
         updateDim();
-
-        // Frame count & FPS updates max slider
         const slider = this.container.querySelector("#t-slider");
         const fWidget = this.node.widgets?.find(w => w.name === "frame_count");
         if(fWidget && slider) {
             slider.max = fWidget.value;
-            const orig = fWidget.callback;
-            fWidget.callback = v => { slider.max = v; if(orig) orig(v); };
+            const orig = fWidget.callback; fWidget.callback = v => { slider.max = v; if(orig) orig(v); };
         }
     }
 
     onResize(vpDiv) {
         if (this.isBaking || !this.renderer || !vpDiv || !this.camera) return;
-        const w = vpDiv.clientWidth;
-        const h = vpDiv.clientHeight;
+        const w = vpDiv.clientWidth; const h = vpDiv.clientHeight;
         if (w && h) {
             this.renderer.setSize(w, h);
-            
             const aspect = w / h;
-            
-            if (this.perspCam) {
-                this.perspCam.aspect = aspect;
-                this.perspCam.updateProjectionMatrix();
-            }
-            
+            if (this.perspCam) { this.perspCam.aspect = aspect; this.perspCam.updateProjectionMatrix(); }
             if (this.orthoCam) {
                 const frustumSize = 4.0;
-                this.orthoCam.left = -frustumSize * aspect / 2;
-                this.orthoCam.right = frustumSize * aspect / 2;
-                this.orthoCam.top = frustumSize / 2;
-                this.orthoCam.bottom = -frustumSize / 2;
+                this.orthoCam.left = -frustumSize * aspect / 2; this.orthoCam.right = frustumSize * aspect / 2;
+                this.orthoCam.top = frustumSize / 2; this.orthoCam.bottom = -frustumSize / 2;
                 this.orthoCam.updateProjectionMatrix();
             }
-            
-            const aspectContainer = w / h;
-            const aspectTarget = this.renderWidth / this.renderHeight;
+            const aspectContainer = w / h; const aspectTarget = this.renderWidth / this.renderHeight;
             let gw, gh;
             if (aspectContainer > aspectTarget) { gh = h - 20; gw = gh * aspectTarget; } 
             else { gw = w - 20; gh = gw / aspectTarget; }
@@ -1543,32 +1944,25 @@ class YedpViewport {
     }
 
     getWidgetValue(name, defaultVal) {
-        const w = this.node.widgets?.find(x => x.name === name);
-        return w ? w.value : defaultVal;
+        const w = this.node.widgets?.find(x => x.name === name); return w ? w.value : defaultVal;
     }
 
     async performBake(isSingleFrame = false) {
-        if (this.characters.length === 0) { alert("No characters added!"); return; }
+        if (this.characters.length === 0 && this.environments.length === 0) { alert("Scene is empty!"); return; }
         const THREE = this.THREE;
         
         const btnId = isSingleFrame ? '#btn-bake-frame' : '#btn-bake';
-        const originalBtnText = isSingleFrame ? 'BAKE FRAME' : 'BAKE V9.18';
-        const btn = this.container.querySelector(btnId);
-        btn.innerText = "PREPARING...";
+        const originalBtnText = isSingleFrame ? 'BAKE FRAME' : 'BAKE V9.21';
+        const btn = this.container.querySelector(btnId); btn.innerText = "PREPARING...";
         
-        this.isBaking = true;
-        this.isPlaying = false;
+        this.isBaking = true; this.isPlaying = false;
         
-        // Hide gizmo
         this.transformControls.detach();
-        // Hide light helpers
         this.lights.forEach(l => l.helper.visible = false);
 
-        const originalSize = new THREE.Vector2();
-        this.renderer.getSize(originalSize);
+        const originalSize = new THREE.Vector2(); this.renderer.getSize(originalSize);
         const originalAspect = this.camera.aspect || (originalSize.width / originalSize.height);
-        const originalZoom = this.camera.zoom;
-        const originalBg = this.scene.background;
+        const originalZoom = this.camera.zoom; const originalBg = this.scene.background;
         
         const vpArea = this.container.querySelector(".yedp-vp-area");
         if (vpArea) {
@@ -1579,10 +1973,8 @@ class YedpViewport {
         }
 
         this.renderer.setSize(this.renderWidth, this.renderHeight);
-        
         const targetRenderAspect = this.renderWidth / this.renderHeight;
-        this.perspCam.aspect = targetRenderAspect;
-        this.perspCam.updateProjectionMatrix();
+        this.perspCam.aspect = targetRenderAspect; this.perspCam.updateProjectionMatrix();
 
         const frustumSize = 4.0;
         this.orthoCam.left = -frustumSize * targetRenderAspect / 2;
@@ -1595,32 +1987,34 @@ class YedpViewport {
         const fps = this.getWidgetValue("fps", 24);
         const step = 1.0 / fps;
         
-        // Determine iteration logic based on single vs batch
         const framesToRender = isSingleFrame ? 1 : totalNodeFrames;
         const currentUIFrame = parseInt(this.container.querySelector("#t-slider").value) || 0;
         
-        const results = { pose: [], depth: [], canny: [], normal: [], shaded: [] };
+        const results = { pose: [], depth: [], canny: [], normal: [], shaded: [], alpha: [] };
 
-        // Determine current visibility intent
         const visSkel = this.container.querySelector("#chk-skel").checked;
-        const toggleHelpers = (vis) => {
-            if(this.gridHelper) this.gridHelper.visible = vis;
-            if(this.axesHelper) this.axesHelper.visible = vis;
-            if(this.floor) this.floor.visible = vis;
+        const toggleHelpers = (vis) => { 
+            if(this.gridHelper) this.gridHelper.visible = vis; 
+            if(this.axesHelper) this.axesHelper.visible = vis; 
+            if(this.floor) this.floor.visible = vis; 
+            if(this.importedCamProxy) this.importedCamProxy.visible = false; 
         };
         toggleHelpers(false);
 
         const setVisibility = (mode) => {
             const showPose = mode === 'pose';
-            const showDepth = mode === 'depth' || mode === 'canny' || mode === 'normal' || mode === 'shaded';
+            const showDepth = ['depth', 'canny', 'normal', 'shaded', 'alpha'].includes(mode);
+            const showEnv = ['depth', 'normal', 'shaded'].includes(mode);
+
             this.characters.forEach(c => {
                 c.poseMeshes.forEach(m => m.visible = showPose);
-                c.inactiveDepthMeshes.forEach(m => m.visible = false); // Force inactive meshes to stay hidden
+                c.inactiveDepthMeshes.forEach(m => m.visible = false); 
                 c.activeDepthMeshes.forEach(m => m.visible = showDepth);
-                
-                // Force hide skeleton helper during all bake passes so it never contaminates the OpenPose result
                 c.skeletonHelper.visible = false; 
             });
+            this.environments.forEach(e => e.meshes.forEach(m => m.visible = showEnv));
+            
+            this.scene.background = new THREE.Color(0x000000); 
         };
 
         const compressCanvas = document.createElement("canvas");
@@ -1631,13 +2025,23 @@ class YedpViewport {
             this.renderer.render(this.scene, this.camera);
             this.renderer.getContext().finish(); 
             if (mimeType === "image/jpeg") {
-                compressCtx.fillStyle = "#000000";
-                compressCtx.fillRect(0, 0, this.renderWidth, this.renderHeight);
-                compressCtx.drawImage(this.renderer.domElement, 0, 0);
-                array.push(compressCanvas.toDataURL(mimeType, quality));
-            } else {
-                array.push(this.renderer.domElement.toDataURL(mimeType));
-            }
+                compressCtx.fillStyle = "#000000"; compressCtx.fillRect(0, 0, this.renderWidth, this.renderHeight);
+                compressCtx.drawImage(this.renderer.domElement, 0, 0); array.push(compressCanvas.toDataURL(mimeType, quality));
+            } else array.push(this.renderer.domElement.toDataURL(mimeType));
+        };
+
+        const executeMaterialPass = (matKey, arrayObj) => {
+            const restores = [];
+            this.characters.forEach(c => c.activeDepthMeshes.forEach(m => { 
+                restores.push({mesh: m, mat: m.material}); 
+                m.material = m.isSkinnedMesh ? this.matsSkinned[matKey] : this.matsStatic[matKey]; 
+            }));
+            this.environments.forEach(e => e.meshes.forEach(m => { 
+                restores.push({mesh: m, mat: m.material}); 
+                m.material = m.isSkinnedMesh ? this.matsSkinned[matKey] : this.matsStatic[matKey]; 
+            }));
+            captureFrame(arrayObj, "image/png");
+            restores.forEach(o => o.mesh.material = o.mat);
         };
 
         // RENDER LOOP
@@ -1646,124 +2050,66 @@ class YedpViewport {
             const time = actualFrame * step;
             const timeRatio = totalNodeFrames > 1 ? actualFrame / (totalNodeFrames - 1) : 0;
             
-            // UI Progress Feedback
             btn.innerText = `BAKING ${idx+1}/${framesToRender}`;
             
+            this.evaluateAnimations(time);
+            this.characters.forEach(c => c.scene.updateMatrixWorld(true));
+            this.environments.forEach(e => e.group.updateMatrixWorld(true));
             this.applyCameraKeyframes(timeRatio);
 
-            this.characters.forEach(c => {
-                if(c.action && c.duration > 0) { 
-                    c.action.time = c.loop ? (time % c.duration) : Math.min(time, c.duration);
-                    c.mixer.update(0); 
-                }
-                c.scene.updateMatrixWorld(true);
-            });
-
-            // PASS 1: OPENPOSE
-            this.scene.background = new THREE.Color(0x000000); 
-            setVisibility('pose');
-            this.resetCamera(); 
+            setVisibility('pose'); this.resetCamera(); 
             captureFrame(results.pose, "image/png"); 
 
-            // PASS 2: DEPTH
-            this.scene.background = new THREE.Color(0x000000);
             setVisibility('depth');
-            this.camera.near = Math.max(0.01, this.userNear);
-            this.camera.far = Math.max(0.1, this.userFar);
-            this.camera.updateProjectionMatrix();
+            this.camera.near = Math.max(0.01, this.userNear); this.camera.far = Math.max(0.1, this.userFar); this.camera.updateProjectionMatrix();
+            executeMaterialPass('depth', results.depth);
 
-            const depthRestores = [];
-            this.characters.forEach(c => {
-                c.activeDepthMeshes.forEach(m => { depthRestores.push({mesh: m, mat: m.material}); m.material = this.depthMat; });
-            });
-            captureFrame(results.depth, "image/png");
-            depthRestores.forEach(o => o.mesh.material = o.mat);
+            setVisibility('canny'); this.resetCamera();
+            executeMaterialPass('canny', results.canny);
 
-            // PASS 3: CANNY
-            this.scene.background = new THREE.Color(0x000000); 
-            setVisibility('canny'); 
-            this.resetCamera();
-            const cannyRestores = [];
-            this.characters.forEach(c => {
-                c.activeDepthMeshes.forEach(m => { cannyRestores.push({mesh: m, mat: m.material}); m.material = this.cannyMat; });
-            });
-            captureFrame(results.canny, "image/png");
-            cannyRestores.forEach(o => o.mesh.material = o.mat);
-
-            // PASS 4: NORMAL
-            this.scene.background = new THREE.Color(0x000000); 
-            setVisibility('normal'); 
-            this.resetCamera();
-            const normalRestores = [];
-            this.characters.forEach(c => {
-                c.activeDepthMeshes.forEach(m => { normalRestores.push({mesh: m, mat: m.material}); m.material = this.normalMat; });
-            });
-            captureFrame(results.normal, "image/png");
-            normalRestores.forEach(o => o.mesh.material = o.mat);
+            setVisibility('normal'); this.resetCamera();
+            executeMaterialPass('normal', results.normal);
             
-            // PASS 5: SHADED
-            this.scene.background = new THREE.Color(0x000000); 
-            setVisibility('shaded'); 
-            this.resetCamera();
-            const shadedRestores = [];
-            this.characters.forEach(c => {
-                c.activeDepthMeshes.forEach(m => { shadedRestores.push({mesh: m, mat: m.material}); m.material = this.shadedMat; });
-            });
-            captureFrame(results.shaded, "image/png");
-            shadedRestores.forEach(o => o.mesh.material = o.mat);
+            setVisibility('shaded'); this.resetCamera();
+            executeMaterialPass('shaded', results.shaded);
 
-            await new Promise(r => setTimeout(r, 10)); // tiny yield
+            setVisibility('alpha'); this.resetCamera();
+            executeMaterialPass('alpha', results.alpha);
+
+            await new Promise(r => setTimeout(r, 10)); 
         }
         
         // Restoration
         this.renderer.setSize(originalSize.width, originalSize.height);
-        
         if (this.perspCam) this.perspCam.aspect = originalAspect;
         if (this.orthoCam) {
             const aspectTarget = originalSize.width / originalSize.height;
             const frustumSize = 4.0;
-            this.orthoCam.left = -frustumSize * aspectTarget / 2;
-            this.orthoCam.right = frustumSize * aspectTarget / 2;
-            this.orthoCam.top = frustumSize / 2;
-            this.orthoCam.bottom = -frustumSize / 2;
+            this.orthoCam.left = -frustumSize * aspectTarget / 2; this.orthoCam.right = frustumSize * aspectTarget / 2;
+            this.orthoCam.top = frustumSize / 2; this.orthoCam.bottom = -frustumSize / 2;
         }
         
         this.camera.zoom = originalZoom; 
-        
         if(this.isDepthMode) { this.camera.near = this.userNear; this.camera.far = this.userFar; } 
         else this.resetCamera();
         this.camera.updateProjectionMatrix();
 
-        toggleHelpers(true); 
-        this.scene.background = originalBg;
-        this.isBaking = false;
+        toggleHelpers(true); this.scene.background = originalBg; this.isBaking = false;
         
-        // Restore helpers and selected state
         this.lights.forEach(l => l.helper.visible = l.type !== 'ambient');
         if (this.selected.obj) this.selectObject(this.selected.obj, this.selected.type, this.selected.id);
         
-        // Restore standard view
         this.updateVisibilities();
         this.characters.forEach(c => { c.skeletonHelper.visible = visSkel; });
         
-        // ---- CRITICAL NEW UPLOAD LOGIC TO PREVENT QUOTA CRASHES ----
-        btn.innerText = "UPLOADING TO CACHE...";
+        btn.innerText = "UPLOADING...";
         const clientDataWidget = this.node.widgets.find(w => w.name === "client_data");
         if (clientDataWidget) {
             try {
-                // Upload massive payload to python memory to avoid localStorage serialization crash
-                const response = await api.fetchApi("/yedp/upload_payload", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(results)
-                });
-                
+                const response = await api.fetchApi("/yedp/upload_payload", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(results) });
                 if (!response.ok) throw new Error("Upload failed");
                 const resData = await response.json();
-                
-                // Store only the tiny ID string inside the widget (safe for localStorage!)
                 clientDataWidget.value = resData.payload_id;
-                console.log(`[Yedp] Batch Render Complete. Cached payload ID: ${resData.payload_id}`);
             } catch (err) {
                 console.error("[Yedp] Memory cache upload failed, falling back to local string:", err);
                 clientDataWidget.value = JSON.stringify(results);
@@ -1782,56 +2128,60 @@ app.registerExtension({
             const onNodeCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function () {
                 const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
-
                 const container = document.createElement("div");
                 container.classList.add("yedp-container");
-                container.style.width = "100%";
-                container.style.height = "100%"; 
+                container.style.width = "100%"; container.style.height = "100%"; 
                 
                 const widget = this.addDOMWidget("3d_viewport", "vp", container, { serialize: false, hideOnZoom: false });
                 widget.computeSize = (w) => [w, 0];
                 
                 setTimeout(() => {
                     const vp = new YedpViewport(this, container);
-                    this.vp = vp; // Store reference for cleanup
+                    this.vp = vp; 
                     const onResizeOrig = this.onResize;
                     this.onResize = function(size) {
                         if (onResizeOrig) onResizeOrig.call(this, size);
                         let usedHeight = 30; 
-                        if (this.widgets) {
-                            for (const w of this.widgets) {
-                                if (w === widget) break;
-                                usedHeight += w.last_h || 26; 
-                            }
-                        }
+                        if (this.widgets) for (const w of this.widgets) { if (w === widget) break; usedHeight += w.last_h || 26; }
                         const safeHeight = Math.max(10, size[1] - usedHeight - 35);
-                        container.style.height = safeHeight + "px";
-                        container.style.maxHeight = "none";
+                        container.style.height = safeHeight + "px"; container.style.maxHeight = "none";
                         vp.onResize(container.querySelector(".yedp-vp-area"));
                     };
-                    
-                    // Hide the raw JSON text widget like in the webcam node
                     const w = this.widgets?.find(w => w.name === "client_data");
                     if (w?.inputEl) w.inputEl.style.display = "none";
                 }, 100);
                 
-                // Made the default UI slightly wider to comfortably fit the viewport + sidebar
                 this.setSize([720, 600]);
                 
-                // Cleanup memory and animation loop when node is deleted
                 this.onRemoved = function() {
                     if (this.vp) {
-                        this.vp.isBaking = false;
-                        this.vp.isPlaying = false;
+                        this.vp.isBaking = false; this.vp.isPlaying = false;
                         if (this.vp._handleKeyDown) window.removeEventListener('keydown', this.vp._handleKeyDown);
-                        if (this.vp.renderer) {
-                            this.vp.renderer.dispose();
-                            this.vp.renderer = null;
-                        }
+                        if (this.vp.renderer) { this.vp.renderer.dispose(); this.vp.renderer = null; }
                     }
                 };
-
                 return r;
+            };
+
+            // NEW: Native ComfyUI Serialization logic!
+            const onSerializeOrig = nodeType.prototype.onSerialize;
+            nodeType.prototype.onSerialize = function (o) {
+                if (onSerializeOrig) onSerializeOrig.apply(this, arguments);
+                if (this.vp) {
+                    o.scene_state = this.vp.serializeScene();
+                }
+            };
+
+            const onConfigureOrig = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function (o) {
+                if (onConfigureOrig) onConfigureOrig.apply(this, arguments);
+                if (o.scene_state) {
+                    this.saved_scene_state = o.scene_state;
+                    // If the viewport has loaded early, apply it. Else, viewport init() will apply it.
+                    if (this.vp && this.vp.isInitialized) {
+                        this.vp.loadScene(this.saved_scene_state);
+                    }
+                }
             };
         }
     }
