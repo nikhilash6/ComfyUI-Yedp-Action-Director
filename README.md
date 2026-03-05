@@ -1,8 +1,6 @@
 # **🎬 ComfyUI Yedp Action Director**
 
-
-https://github.com/user-attachments/assets/bb543f35-2efe-49a9-b51a-093986ddd25e
-
+https://github.com/user-attachments/assets/24be7683-c92c-4ba8-a64e-1106b8325f53
 
 **A powerful 3D viewport node for ComfyUI to direct, preview, and batch-render 3D character animations, environments, and custom cameras for ControlNet workflows.**
 
