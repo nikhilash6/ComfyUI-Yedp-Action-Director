@@ -1,46 +1,45 @@
 # **🎬 ComfyUI Yedp Action Director**
 
-https://github.com/user-attachments/assets/24be7683-c92c-4ba8-a64e-1106b8325f53
+
+
+https://github.com/user-attachments/assets/9e7d56c9-e2cd-4ff6-a505-93e4eabae959
+
+
 
 **A powerful 3D viewport node for ComfyUI to direct, preview, and batch-render 3D character animations, environments, and custom cameras for ControlNet workflows.**
 
 
 ## **🌟 Overview**
 
-**Yedp Action Director** is a custom node for ComfyUI that integrates a fully interactive 3D viewport directly into your workflow. It allows you to dynamically load up to 16 characters, assign independent MoCap animations, import full 3D environments and baked physics, compose them in 3D space, animate or override camera movements, and bake pixel-perfect **OpenPose, Depth, Canny, Normal, Shaded, and Alpha** passes directly into your ControlNet pipelines.
+**Yedp Action Director** is a custom node for ComfyUI that integrates a fully interactive 3D viewport directly into your workflow. It allows you to dynamically load up to 16 characters, assign sequenced MoCap animations, capture facial expressions via webcam/video, import 3D environments, animate custom cameras, and bake pixel-perfect **OpenPose, Depth, Canny, Normal, Shaded, and Alpha** passes directly into your ControlNet pipelines.
 
 ## **✨ Key Features**
 
 * **Interactive 3D Viewport:** Fully resizable, click-to-select raycasting, orbit controls, and real-time playback scrubbing.  
 * **Multi-Pass Rendering:** Generates 6 distinct batches in one go:  
-  * **🔴 Pose:** Unlit flat colors for OpenPose.  
+  * **🔴 Pose:** Unlit flat colors for OpenPose (includes facial landmarks).  
   * **⚫ Depth:** High-quality depth maps with **Manual Near/Far** controls.  
   * **⚪ Canny:** Procedural Rim-Light (Matcap) for perfect edge detection.  
   * **🔵 Normal:** Standard RGB normal maps for geometry detail.  
   * **🟠 Shaded:** Clay-style renders for spatial and lighting reference.  
   * **🏁 Alpha:** Pure black and white character/prop matte masks for compositing.  
-* **Format Support:** Supports standard .fbx and .glb animation and environment files.  
-* **Smart Retargeting:** Auto-detects and normalizes bone names (Mixamo & HY-MOTION compatible).  
-* **Workflow Serialization:** Your entire 3D scene setup (positions, loops, cameras) is saved directly inside your ComfyUI workflow.
+* **Format Support:** Supports standard .fbx, .bvh, and .glb animation/environment files.  
+* **Workflow Serialization:** Your entire 3D scene setup (positions, sequences, cameras, mocaps) is saved directly inside your ComfyUI workflow.
 
-## **🚀 What's New in V9.20 (The Environment & Pipeline Update)**
+## **🚀 What's New in V9.28 (Face Mocap & Sequencer Update)**
 
-This major update transforms Action Director from a character-posing tool into a full 3D scene compositor, bridging the gap between ComfyUI and professional DCCs like Maya and Blender.
+### **🎭 Facial Motion Capture (MediaPipe)**
 
-### **🌍 Environments & Baked Physics**
+* **Local Web/Video Mocap:** Drive your character's face directly inside the viewport using your Webcam or an uploaded Video file.  
+* **Offline Video Processing:** Video files are processed sequentially frame-by-frame for zero dropped frames and perfect 30 FPS synchronization.  
+* **Smart Auto-Scaling:** The engine mathematically calculates the ear-to-ear distance of your 3D rig and proportionally scales your facial performance to fit perfectly, stored as an un-rotated local additive delta.  
+* **Disk Saving:** Captures are automatically saved as JSON files to your yedp\_mocap folder for reuse across workflows.
 
-* **Environment Imports:** Load full .fbx and .glb scene meshes (buildings, streets, static props) from the new input/yedp\_envs folder. Environments properly cast and receive shadows.  
-* **Animated Environments:** Standard object animations (like a moving car, sliding doors, or rotating fans keyframed in Maya/Blender) are fully supported. Simply check the "Loop (Anim)" box\!  
-* **Alembic-Style Physics (Blend Shapes):** The engine natively reads GLTF Morph Targets and Shape Key animations\! Run cloth, soft-body, or wind simulations in Maya/Blender, bake them to Shape Keys, and import them directly into the environment tab for real-time physics\!  
-* **FBX Opacity Auto-Fix:** Automatically patches a common Maya/Blender export bug where FBX materials import completely invisible.
+### **🎞️ Multi-Clip Animation Sequencer**
 
-### **🎥 Advanced Camera Pipeline**
-
-* **Animated Camera Imports:** You can now import .fbx and .glb animated camera tracks directly from your 3D software\!  
-* **Camera Override System:** Check "Override" to lock the viewport and perfectly trace your imported camera path in real-time.  
-* **Maya / 3D Coordinate Fixer:** Built-in "FBX Import Fix" panel allows you to adjust local Rotation Pivot (Rx, Ry, Rz) and Distance Scale directly on the camera. Easily fixes the classic "Z-Up to Y-Up" axis swap and Centimeter-to-Meter scale issues.  
-* **Ghost Camera Visualizer:** A cyan wireframe proxy camera appears in the scene so you can visually align and scale your Maya camera before engaging the override.  
-* **Dedicated Camera Folder:** Camera animations are cleanly isolated in their own input/yedp\_cams folder.
+* **Animation Sequencing:** Characters are no longer limited to a single animation clip\! You can now queue up an infinite sequence of .fbx or .bvh files.  
+* **Auto-Crossfading:** The engine automatically calculates 0.5s overlapping weight blends between your clips for smooth transitions.  
+* **Circular Time-Wrapping:** When a character is set to "Loop", the final sequence clip mathematically blends flawlessly back into the first.
 
 ### **✨ Massive UX & UI Overhaul**
 
@@ -54,11 +53,12 @@ This major update transforms Action Director from a character-posing tool into a
 1. **Clone the repository** into your ComfyUI custom nodes directory:  
    cd ComfyUI/custom\_nodes/  
    git clone https://github.com/YourUsername/ComfyUI-Yedp-Action-Director.git  
-2. **Install Dependencies:** No external Python dependencies are required beyond standard ComfyUI requirements. The frontend libraries (Three.js) are loaded dynamically.  
-3. **Add Animations & Assets:** Create the following folders inside your ComfyUI input directory and place your .fbx or .glb files accordingly:  
+2. **Install Dependencies:** No external Python dependencies are required beyond standard ComfyUI requirements. The frontend libraries (Three.js and MediaPipe) are loaded dynamically.  
+3. **Add Animations & Assets:** Create the following folders inside your ComfyUI input directory and place your files accordingly:  
    * **Characters:** ComfyUI/input/yedp\_anims/  
-   * **Environments/Physics:** ComfyUI/input/yedp\_envs/  
+   * **Environments:** ComfyUI/input/yedp\_envs/  
    * **Cameras:** ComfyUI/input/yedp\_cams/  
+   * **Mocap Data:** ComfyUI/input/yedp\_mocap/ *(Auto-created upon first save)*  
 4. **Restart ComfyUI.**
 
 ## **🛠️ Usage**
@@ -69,16 +69,25 @@ This major update transforms Action Director from a character-posing tool into a
 * **Adjust Settings:** Set your Output width & height, total frame\_count, and fps.  
 * **Viewport Toggles:** Use the top checkboxes to preview your scene in Shaded, Depth, or Skel (Skeleton) modes. Adjust the Depth Near/Far inputs to maximize contrast.
 
-### **2\. Scene Assembly (Characters & Environments)**
+### **2\. Scene Assembly & Animation Sequencing**
 
-* Click **\+ Add Char** or **\+ Add Env** to spawn elements into the scene.  
-* **Selection:** Click directly on the object in the 3D viewport, or click its card in the sidebar.  
-* **Transform:** Use the floating Gizmo icons (or hotkeys G, R, S) to Move, Rotate, and Scale your objects. Click the X icon or click empty space to deselect.  
-* **Animation:** Assign an animation from the dropdown. Toggle the **Loop** checkbox for continuous playback.
+* Click **\+ Add Char** or **\+ Add Env** to spawn elements into the scene. Click directly on objects to select them.  
+* Use the floating Gizmo icons (or hotkeys G, R, S) to Move, Rotate, and Scale.  
+* **Sequencer:** Under the Character card, click **\+ Add Sequence Anim** to add a slot. Select an animation from the dropdown. Add as many as you need—the engine will automatically crossfade between them\!  
+* **The M/F (Gender) Toggle:** Instantly swap the underlying depth mesh of the character between Male (M) and Female (F) using the exact same skeletal animation\!
 
 ### **3\. The M/F (Gender) Toggle**
 
 Next to the Character Loop checkbox is a toggle button indicating **M** (Male) or **F** (Female). Clicking this instantly swaps the underlying depth mesh of the character, allowing you to direct scenes with mixed genders using the exact same skeletal animation\!
+
+### **3\. Facial Motion Capture (Mocap)**
+
+1. Open the **Motion Capture** sidebar tab.  
+2. Select **Webcam** or **Video File**.  
+3. Click **📷 Start** (or 📂 Load for video).  
+4. Once tracking begins (you will see the green dots), click **🔴 Rec** to begin recording.  
+5. Click **⏹ Stop** (or let the video finish). The performance is automatically saved\!  
+6. Click **\+ Add Face Bind**, assign it to your Character, and select your newly recorded Mocap from the dropdown to apply it. Use the "Amp" slider to exaggerate or dampen the expressions.
 
 ### **4\. Camera Direction**
 
@@ -89,7 +98,7 @@ You have two ways to animate your camera:
 
 ### **5\. Baking**
 
-Click the **BAKE V9.20** button in the viewport header (or BAKE FRAME for a single test frame). The engine will rapidly generate 6 separate visual passes, temporarily cache them to avoid browser crashes, and output them as image batches directly into your ComfyUI workflow.
+Click the **BAKE V9.28** button in the viewport header (or BAKE FRAME for a single test frame). The engine will rapidly generate 6 separate visual passes, temporarily cache them to avoid browser crashes, and output them as image batches directly into your ComfyUI workflow.
 
 ## **🛠️ Custom Rigging & Prop Setup (For Advanced Users)**
 
