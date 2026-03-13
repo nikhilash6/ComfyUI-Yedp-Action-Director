@@ -22,6 +22,10 @@ if "yedp_envs" not in folder_paths.folder_names_and_paths:
 if "yedp_cams" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_cams"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_cams")], {".glb", ".fbx"})
 
+# Added: Register yedp_mocap folder for saving/loading face tracks
+if "yedp_mocap" not in folder_paths.folder_names_and_paths:
+    folder_paths.folder_names_and_paths["yedp_mocap"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_mocap")], {".json"})
+
 # Global Cache for massive payloads
 YEDP_PAYLOAD_CACHE = {}
 
@@ -139,13 +143,47 @@ async def get_envs(request):
         files = []
     return web.json_response({"files": files})
 
-# Added: API Route for fetching cameras from the new folder
 @PromptServer.instance.routes.get("/yedp/get_cams")
 async def get_cams(request):
     files = folder_paths.get_filename_list("yedp_cams")
     if not files:
         files = []
     return web.json_response({"files": files})
+
+# Added: API Route for fetching mocaps from disk
+@PromptServer.instance.routes.get("/yedp/get_mocaps")
+async def get_mocaps(request):
+    files = folder_paths.get_filename_list("yedp_mocap")
+    if not files:
+        files = []
+    return web.json_response({"files": files})
+
+# Added: API Route for saving a generated mocap tracking file to disk
+@PromptServer.instance.routes.post("/yedp/save_mocap")
+async def save_mocap(request):
+    try:
+        data = await request.json()
+        name = data.get("name", "Capture")
+        mocap_id = data.get("id", uuid.uuid4().hex[:8])
+        
+        # Clean up the file name to avoid invalid path characters
+        safe_name = "".join([c for c in name if c.isalnum() or c in [' ', '_']]).rstrip()
+        safe_name = safe_name.replace(" ", "_")
+        file_name = f"{safe_name}_{mocap_id}.json"
+
+        # Ensure directory exists
+        mocap_dir = folder_paths.folder_names_and_paths["yedp_mocap"][0][0]
+        os.makedirs(mocap_dir, exist_ok=True)
+        
+        file_path = os.path.join(mocap_dir, file_name)
+        with open(file_path, "w") as f:
+            json.dump(data, f)
+            
+        print(f"[Yedp] Saved Mocap data to {file_path}")
+        return web.json_response({"status": "success", "file": file_name})
+    except Exception as e:
+        print(f"[Yedp] Failed to save Mocap: {e}")
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
 
 @PromptServer.instance.routes.post("/yedp/upload_payload")
 async def upload_payload(request):

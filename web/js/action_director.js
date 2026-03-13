@@ -1,14 +1,17 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-/** * YEDP ACTION DIRECTOR - V9.21 (Auto-Save & Hot-Reload Update)
- * - Added: ComfyUI Native Serialization. The entire 3D scene state (Camera, Keyframes, Chars, Envs, Lights, Settings) 
- * is now automatically saved into the ComfyUI workflow .json file.
- * - Added: "SYNC FOLDERS" button to dynamically hot-reload newly added files into dropdowns without reloading the browser.
- * - Added: Environments Support. Load GLTF/FBX props and scenes from `yedp_envs`.
- * - Added: Alembic-Style Physics Support via GLTF Morph Targets and Skeletal Animations natively supported in Environments.
- * - Added: Black and White Alpha Mask generation pass.
- * - Added: Custom Animated Camera import override (FBX/GLB support) from `yedp_cams`.
+/** * YEDP ACTION DIRECTOR - V9.28 (Perfected Face Mocap, Offline Video, & Sequencer)
+ * - Update: Added Multi-Clip Animation Sequencer! Characters can now queue an infinite sequence of animations.
+ * - Update: Auto-Crossfade System. Sequencer automatically calculates 0.5s overlapping weight blends.
+ * - Update: Circular Time-Wrapping. Looping a character now mathematically blends the final sequence clip flawlessly back into the first.
+ * - Update: Implemented Offline Video Processing. Video files now process sequentially frame-by-frame for zero dropped frames and perfect 30 FPS synchronization.
+ * - Update: Switched coordinate extraction to Isotropic Pixel Space to completely eliminate mesh-mangling bugs on non-16:9 video aspect ratios.
+ * - Update: Matrix Un-Rotation applied to MediaPipe capture. Expressions are now stored in pure Local Space and are completely decoupled from head rotation!
+ * - Update: Perfected the 17-point Jawline mapping array for absolute symmetry, fixing gaps near the chin.
+ * - Update: Switched to Additive Mocap! MediaPipe now tracks relative deltas from frame 0 and applies them to the Rig's rest pose.
+ * - Update: Proportional Auto-Scaling measures the 3D rig's ear-to-ear distance to scale mocap perfectly to any character.
+ * - Feature: Added JSON disk-saving and loading for recorded Mocap tracks!
  */
 
 const loadThreeJS = async () => {
@@ -17,7 +20,7 @@ const loadThreeJS = async () => {
     return window._YEDP_THREE_CACHE = new Promise(async (resolve, reject) => {
         const baseUrl = new URL(".", import.meta.url).href;
         try {
-            console.log("[Yedp] Initializing Engine V9.21 (Offline Mode)...");
+            console.log("[Yedp] Initializing Engine V9.28 (Sequencer Mode)...");
             
             const THREE = await import(new URL("./three.module.js", baseUrl).href);
 
@@ -46,6 +49,7 @@ const loadThreeJS = async () => {
     });
 };
 
+// --- UNIVERSAL BONE MAPPING DICTIONARY ---
 const { BONE_MAP, BONE_KEYS_SORTED } = (() => {
     const map = {};
     const synonyms = {
@@ -131,29 +135,64 @@ const semanticNormalize = (name) => {
     return clean;
 };
 
+// --- MOCAP CONSTANTS ---
+const MP_TO_OP_FACE = [
+    162, 234, 93, 58, 172, 136, 149, 148, 152, 377, 378, 365, 397, 288, 323, 454, 389, // 0-16 Jaw
+    46, 53, 52, 65, 55,       // 17-21 Right Brow
+    285, 295, 282, 283, 276,  // 22-26 Left Brow
+    6, 197, 195, 5,           // 27-30 Nose Bridge
+    98, 97, 2, 326, 327,      // 31-35 Nose Bottom
+    33, 160, 158, 133, 153, 144, // 36-41 Right Eye
+    362, 385, 387, 263, 373, 380, // 42-47 Left Eye
+    61, 39, 37, 0, 267, 269, 291, 405, 314, 17, 84, 181, // 48-59 Outer Lips
+    78, 81, 13, 311, 308, 402, 14, 178, // 60-67 Inner Lips
+    468, 473                  // 68-69 Pupils
+];
+
 // --- CLASSES ---
 class CharacterInstance {
     constructor(id, baseRig, THREE) {
         this.id = id;
         this.scene = window._YEDP_SKEL_UTILS.clone(baseRig);
         this.mixer = new THREE.AnimationMixer(this.scene);
-        this.action = null;
+        
+        // Sequencer Architecture replaces single action
+        this.animSequence = [];
+        this.animIdCounter = 0;
+        
         this.duration = 0; 
         this.loop = true;
+        this.blendDuration = 0.5; 
         this.gender = 'M'; 
+        this.showFace = true;
         this.hasFemaleMesh = false; 
+        this.faceScale = 1.0; 
 
         this.poseMeshes = [];
+        this.poseFaceMeshes = []; 
         this.depthMeshesM = [];
         this.depthMeshesF = [];
         
+        this.opFaceBones = new Array(70).fill(null);
+        this.opFaceBonesRest = new Array(70).fill(null); 
+
         this.skeletonHelper = new THREE.SkeletonHelper(this.scene);
         this.skeletonHelper.visible = true;
-        this.animFile = "none";
 
         this.scene.position.set((id - 1) * 1.0, 0, 0);
 
         this.scene.traverse((child) => {
+            if (child.isBone && child.name.includes("OP_Face_")) {
+                const match = child.name.match(/OP_Face_(\d+)/);
+                if (match) {
+                    const idx = parseInt(match[1]);
+                    if (idx >= 0 && idx < 70) {
+                        this.opFaceBones[idx] = child;
+                        this.opFaceBonesRest[idx] = child.position.clone();
+                    }
+                }
+            }
+
             if(child.isMesh || child.isSkinnedMesh) {
                 child.visible = true; 
                 child.frustumCulled = false; 
@@ -172,6 +211,9 @@ class CharacterInstance {
 
                 if (n.includes("openpose") || n.includes("pose")) {
                     this.poseMeshes.push(child);
+                    if (n.includes("face")) {
+                        this.poseFaceMeshes.push(child);
+                    }
                     category = "Pose";
                     if (child.material) {
                         const processMat = (mat) => {
@@ -205,6 +247,21 @@ class CharacterInstance {
 
     get activeDepthMeshes() { return (this.gender === 'F' && this.hasFemaleMesh) ? this.depthMeshesF : this.depthMeshesM; }
     get inactiveDepthMeshes() { return (this.gender === 'F' && this.hasFemaleMesh) ? this.depthMeshesM : this.depthMeshesF; }
+
+    addSequenceItem(filename = "none") {
+        this.animIdCounter++;
+        const item = {
+            id: this.animIdCounter,
+            file: filename,
+            action: null,
+            duration: 0,
+            startTime: 0,
+            blendIn: 0,
+            blendOut: 0
+        };
+        this.animSequence.push(item);
+        return item;
+    }
 
     destroy(scene) {
         scene.remove(this.scene);
@@ -263,6 +320,24 @@ class YedpViewport {
         this.lights = [];
         this.lightCounter = 0;
 
+        // Face Mocap State
+        this.recordedMocaps = [];
+        this.mocapBindings = [];  
+        this.mocapBindingCounter = 0;
+        
+        // MediaPipe Integration State
+        this.visionLib = null;
+        this.faceLandmarker = null;
+        this.isMocapActive = false;
+        this.isMocapRecording = false;
+        this.isMocapStarting = false;
+        this.mocapVideoEl = null;
+        this.mocapCanvasEl = null;
+        this.currentMocapSession = null;
+        this.mocapMediaStream = null;
+        this.mocapOverlay = null;
+        this.mocapTimer = null;
+
         this.selected = { obj: null, type: null, id: null };
 
         this.gridHelper = null;
@@ -305,6 +380,9 @@ class YedpViewport {
         this.uiCharList = null;
         this.uiEnvList = null;
         this.uiLightList = null;
+        this.uiMocapList = null; 
+        this.uiMocapDropdowns = []; 
+        
         this.uiTransformInputs = {};
 
         this.isHovered = false;
@@ -524,6 +602,7 @@ class YedpViewport {
             await this.fetchAnimations();
             await this.fetchEnvs();
             await this.fetchCams(); 
+            await this.fetchMocaps(); 
 
             this.setupHeader(headerDiv);
             this.setupTimeline(timelineDiv);
@@ -544,7 +623,6 @@ class YedpViewport {
             const resizeObserver = new ResizeObserver(() => this.onResize(viewportDiv));
             resizeObserver.observe(viewportDiv);
 
-            // Signal initialization is complete. If ComfyUI saved a state, load it now!
             this.isInitialized = true;
             if (this.node.saved_scene_state) {
                 await this.loadScene(this.node.saved_scene_state);
@@ -579,7 +657,7 @@ class YedpViewport {
     // --- COMfyUI STATE SERIALIZATION ---
     serializeScene() {
         return JSON.stringify({
-            version: 1,
+            version: 3,
             camera: {
                 pos: this.camera.position.toArray(),
                 rot: this.camera.rotation.toArray(),
@@ -602,12 +680,20 @@ class YedpViewport {
             })),
             characters: this.characters.map(c => ({
                 pos: c.scene.position.toArray(), rot: c.scene.rotation.toArray(), scl: c.scene.scale.toArray(),
-                gender: c.gender, loop: c.loop, animFile: c.animFile
+                gender: c.gender, loop: c.loop, 
+                blendDuration: c.blendDuration !== undefined ? c.blendDuration : 0.5,
+                animSequence: c.animSequence.map(a => a.file), 
+                animFile: c.animSequence.length > 0 ? c.animSequence[0].file : "none", // Legacy fallback
+                showFace: c.showFace, faceScale: c.faceScale
             })),
             environments: this.environments.map(e => ({
                 pos: e.group.position.toArray(), rot: e.group.rotation.toArray(), scl: e.group.scale.toArray(),
                 loop: e.loop, envFile: e.envFile
             })),
+            mocap: {
+                recordings: [], 
+                bindings: this.mocapBindings
+            },
             settings: {
                 isShadedMode: this.isShadedMode,
                 isDepthMode: this.isDepthMode,
@@ -624,12 +710,10 @@ class YedpViewport {
             console.log("[Yedp] Loading saved scene state from ComfyUI Workflow...");
             const state = JSON.parse(stateStr);
             
-            // 1. Wipe Defaults
             const oldChars = [...this.characters]; oldChars.forEach(c => this.removeCharacter(c.id));
             const oldEnvs = [...this.environments]; oldEnvs.forEach(e => this.removeEnvironment(e.id));
             const oldLights = [...this.lights]; oldLights.forEach(l => this.removeLight(l.id));
 
-            // 2. Load General Settings
             if (state.settings) {
                 this.isShadedMode = state.settings.isShadedMode || false;
                 this.isDepthMode = state.settings.isDepthMode || false;
@@ -643,7 +727,6 @@ class YedpViewport {
                 if (this.isDepthMode) this.container.querySelector("#depth-ctrls").style.opacity = "1.0";
             }
 
-            // 3. Load Camera
             if (state.camera) {
                 this.isOrthographic = state.camera.isOrtho || false;
                 const chkOrtho = this.container.querySelector("#chk-ortho"); if(chkOrtho) chkOrtho.checked = this.isOrthographic;
@@ -679,18 +762,10 @@ class YedpViewport {
                 if (state.camera.camKeys) {
                     this.camKeys.ease = state.camera.camKeys.ease || 'linear';
                     if (state.camera.camKeys.start) {
-                        this.camKeys.start = { 
-                            pos: new this.THREE.Vector3().fromArray(state.camera.camKeys.start.pos), 
-                            quat: new this.THREE.Quaternion().fromArray(state.camera.camKeys.start.quat), 
-                            zoom: state.camera.camKeys.start.zoom || 1 
-                        };
+                        this.camKeys.start = { pos: new this.THREE.Vector3().fromArray(state.camera.camKeys.start.pos), quat: new this.THREE.Quaternion().fromArray(state.camera.camKeys.start.quat), zoom: state.camera.camKeys.start.zoom || 1 };
                     }
                     if (state.camera.camKeys.end) {
-                        this.camKeys.end = { 
-                            pos: new this.THREE.Vector3().fromArray(state.camera.camKeys.end.pos), 
-                            quat: new this.THREE.Quaternion().fromArray(state.camera.camKeys.end.quat), 
-                            zoom: state.camera.camKeys.end.zoom || 1 
-                        };
+                        this.camKeys.end = { pos: new this.THREE.Vector3().fromArray(state.camera.camKeys.end.pos), quat: new this.THREE.Quaternion().fromArray(state.camera.camKeys.end.quat), zoom: state.camera.camKeys.end.zoom || 1 };
                     }
                 }
                 this.controls.object = this.camera;
@@ -703,7 +778,6 @@ class YedpViewport {
                 await this.loadCameraAnim(state.settings.customCamAnim);
             }
 
-            // 4. Load Lights
             if (state.lights) {
                 state.lights.forEach(l => {
                     this.addLight(l.type);
@@ -714,7 +788,7 @@ class YedpViewport {
                 });
             }
 
-            // 5. Load Characters
+            // Restore Characters & their Sequence!
             if (state.characters) {
                 for (const cData of state.characters) {
                     this.addCharacter();
@@ -724,11 +798,28 @@ class YedpViewport {
                     newC.scene.scale.fromArray(cData.scl);
                     newC.gender = cData.gender || 'M';
                     newC.loop = cData.loop !== false;
-                    if (cData.animFile && cData.animFile !== "none") await this.loadAnimationForChar(newC, cData.animFile);
+                    newC.blendDuration = cData.blendDuration !== undefined ? cData.blendDuration : 0.5;
+                    newC.showFace = cData.showFace !== false;
+                    newC.faceScale = cData.faceScale !== undefined ? cData.faceScale : 1.0;
+                    
+                    newC.opFaceBones.forEach(b => { if(b) b.scale.setScalar(newC.faceScale); });
+                    
+                    newC.animSequence = []; // Clear the default added item
+                    
+                    if (cData.animSequence && cData.animSequence.length > 0) {
+                        for (const f of cData.animSequence) {
+                            const item = newC.addSequenceItem(f);
+                            if (f !== "none") await this.loadSequenceAnim(newC, item, f);
+                        }
+                    } else if (cData.animFile && cData.animFile !== "none") {
+                        const item = newC.addSequenceItem(cData.animFile);
+                        await this.loadSequenceAnim(newC, item, cData.animFile);
+                    } else {
+                        newC.addSequenceItem("none");
+                    }
                 }
             }
 
-            // 6. Load Environments
             if (state.environments) {
                 for (const eData of state.environments) {
                     this.addEnvironment();
@@ -741,10 +832,25 @@ class YedpViewport {
                 }
             }
             
+            if (state.mocap) {
+                // BUG FIX: Completely removed the line that was overwriting this.recordedMocaps with [] 
+                // so the files fetched from disk persist!
+                this.mocapBindings = (state.mocap.bindings || []).map(b => ({
+                    id: b.id, charId: b.charId, mocapId: b.mocapId,
+                    amplitude: b.amplitude !== undefined ? b.amplitude : (b.scale !== undefined ? b.scale : 1.0),
+                    loop: b.loop !== undefined ? b.loop : true
+                }));
+                if(this.mocapBindings.length > 0) {
+                    this.mocapBindingCounter = Math.max(...this.mocapBindings.map(b => b.id)) + 1;
+                }
+            }
+
             this.updateVisibilities();
             this.renderCharacterCards();
             this.renderEnvironmentCards();
             this.renderLightCards();
+            this.syncMocapDropdowns();
+            this.renderMocapBindings();
             this.forceUpdateFrame();
 
         } catch (e) {
@@ -789,7 +895,7 @@ class YedpViewport {
                 <span id="lbl-res" style="color:#00d2ff; font-family:monospace; font-size:10px; margin-right:5px; align-self:center;">512x512</span>
                 <button id="btn-refresh" style="border:1px solid #4ade80; color:#4ade80; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;" title="Refresh Files">↻ SYNC FOLDERS</button>
                 <button id="btn-bake-frame" style="border:1px solid #ffaa00; color:#ffaa00; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE FRAME</button>
-                <button id="btn-bake" style="border:1px solid #ff0055; color:#ff0055; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE V9.21</button>
+                <button id="btn-bake" style="border:1px solid #ff0055; color:#ff0055; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE V9.28</button>
             </div>
         `;
 
@@ -818,21 +924,27 @@ class YedpViewport {
             this.forceUpdateFrame();
         };
 
-        div.querySelector("#inp-near").onchange = (e) => { this.userNear = parseFloat(e.target.value); if(this.isDepthMode) { this.updateCameraBounds(); this.forceUpdateFrame(); } };
-        div.querySelector("#inp-far").onchange = (e) => { this.userFar = parseFloat(e.target.value); if(this.isDepthMode) { this.updateCameraBounds(); this.forceUpdateFrame(); } };
-        
+        const stop = e => e.stopPropagation();
+        const inpNear = div.querySelector("#inp-near");
+        inpNear.onchange = (e) => { this.userNear = parseFloat(e.target.value); if(this.isDepthMode) { this.updateCameraBounds(); this.forceUpdateFrame(); } };
+        inpNear.addEventListener('keydown', stop); inpNear.addEventListener('mousedown', stop);
+
+        const inpFar = div.querySelector("#inp-far");
+        inpFar.onchange = (e) => { this.userFar = parseFloat(e.target.value); if(this.isDepthMode) { this.updateCameraBounds(); this.forceUpdateFrame(); } };
+        inpFar.addEventListener('keydown', stop); inpFar.addEventListener('mousedown', stop);
+
         div.querySelector("#chk-skel").onchange = (e) => {
             this.characters.forEach(c => { if(c.skeletonHelper) c.skeletonHelper.visible = e.target.checked; });
             this.forceUpdateFrame();
         };
         
-        // NEW SYNC BUTTON LOGIC
         div.querySelector("#btn-refresh").onclick = async () => {
             const btn = div.querySelector("#btn-refresh");
             btn.innerText = "SYNCING...";
             await this.fetchAnimations();
             await this.fetchEnvs();
             await this.fetchCams();
+            await this.fetchMocaps();
             
             this.renderCharacterCards();
             this.renderEnvironmentCards();
@@ -874,24 +986,170 @@ class YedpViewport {
         };
     }
 
+    // --- ANIMATION SCHEDULER (NEW!) ---
+    updateSequenceSchedule(c) {
+        const seq = c.animSequence.filter(a => a.action && a.duration > 0);
+        if (seq.length === 0) {
+            c.duration = 0;
+            return;
+        }
+        if (seq.length === 1) {
+            seq[0].startTime = 0;
+            seq[0].blendIn = 0;
+            seq[0].blendOut = 0;
+            c.duration = seq[0].duration;
+            return;
+        }
+
+        const maxBlend = c.blendDuration !== undefined ? c.blendDuration : 0.5;
+        let currentTime = 0;
+
+        // Pass 1: Calculate the outgoing blend limits
+        for (let i = 0; i < seq.length; i++) {
+            const current = seq[i];
+            const next = seq[(i + 1) % seq.length];
+            
+            let b = Math.min(maxBlend, current.duration / 2, next.duration / 2);
+            if (!c.loop && i === seq.length - 1) b = 0; // Final clip shouldn't blend out to void
+            
+            current.blendOut = b;
+        }
+        
+        // Pass 2: Transfer outgoing blend limits to the next incoming clip
+        for (let i = 0; i < seq.length; i++) {
+            const prev = seq[(i - 1 + seq.length) % seq.length];
+            seq[i].blendIn = prev.blendOut;
+            if (!c.loop && i === 0) seq[i].blendIn = 0; // First clip shouldn't blend in from void
+        }
+
+        // Pass 3: Map sequence absolutely to timeline
+        for (let i = 0; i < seq.length; i++) {
+            seq[i].startTime = currentTime;
+            currentTime += seq[i].duration - seq[i].blendOut;
+        }
+        
+        // Final Duration Definition
+        if (c.loop) {
+            // For perfectly looping, the timeline wraps cleanly exactly when the blend out starts!
+            c.duration = currentTime;
+        } else {
+            const last = seq[seq.length - 1];
+            c.duration = last.startTime + last.duration;
+        }
+    }
+
     evaluateAnimations(t) {
+        // Evaluate Sequenced Animation Rig
         this.characters.forEach(c => {
-            if(c.action && c.duration > 0) { 
-                c.action.time = c.loop ? (t % c.duration) : Math.min(t, c.duration);
-                c.mixer.update(0); 
+            if (c.animSequence && c.animSequence.length > 0 && c.duration > 0) {
+                const seq = c.animSequence.filter(a => a.action && a.duration > 0);
+                const t_eval = c.loop ? (t % c.duration) : Math.min(t, c.duration);
+                
+                seq.forEach((item, i) => {
+                    let tau = t_eval - item.startTime;
+                    
+                    if (c.loop) {
+                        // Modulo allows circular time-wrap backwards to capture fade-in overlaps!
+                        tau = tau % c.duration;
+                        if (tau < 0) tau += c.duration;
+                    } else {
+                        // BUG FIX: If holding on the final frame of the sequence, clamp slightly before duration end
+                        if (i === seq.length - 1 && tau >= item.duration - 0.001) {
+                            tau = Math.max(0, item.duration - 0.001); 
+                        }
+                    }
+                    
+                    if (tau >= -0.001 && tau <= item.duration + 0.001) {
+                        tau = Math.max(0, Math.min(item.duration, tau)); // perfect clamp
+                        let weight = 1.0;
+                        
+                        // Compute crossfade weights dynamically for evaluating frame
+                        if (item.blendIn > 0 && tau <= item.blendIn) {
+                            weight = tau / item.blendIn;
+                        }
+                        if (item.blendOut > 0 && tau >= item.duration - item.blendOut) {
+                            weight = Math.min(weight, (item.duration - tau) / item.blendOut);
+                        }
+                        
+                        item.action.time = tau;
+                        item.action.setEffectiveWeight(weight);
+                    } else {
+                        item.action.setEffectiveWeight(0);
+                    }
+                });
+                
+                c.mixer.update(0); // Trigger standard engine update based on our forces
             }
         });
+
+        // BUG FIX: Simple single-clip environment updates using setTime to strictly freeze blendshapes.
         this.environments.forEach(e => {
             if(e.action && e.duration > 0) { 
-                e.action.time = e.loop ? (t % e.duration) : Math.min(t, e.duration);
-                e.mixer.update(0); 
+                let evalTime = e.loop ? (t % e.duration) : Math.max(0, Math.min(t, e.duration - 0.001));
+                e.mixer.setTime(evalTime);
             }
         });
+        
         if (this.cameraAction && this.cameraMixer) {
             const d = this.cameraAction.getClip().duration;
             this.cameraAction.time = (t % d);
             this.cameraMixer.update(0);
         }
+
+        // Apply Native Face Mocaps (Additive Auto-Scaling Delta)
+        this.mocapBindings.forEach(binding => {
+            const char = this.characters.find(c => c.id == binding.charId);
+            const mocap = this.recordedMocaps.find(m => m.id === binding.mocapId);
+            
+            if (!char || !mocap || mocap.frames.length === 0) return;
+
+            let frameIdx;
+            if (binding.loop !== false) {
+                frameIdx = Math.floor((t % mocap.duration) * mocap.fps) % mocap.frames.length;
+            } else {
+                frameIdx = Math.min(Math.floor(t * mocap.fps), mocap.frames.length - 1);
+            }
+            
+            const pArr = mocap.frames[frameIdx];
+            const pArrZero = mocap.frames[0]; 
+
+            const rigLeftEar = char.opFaceBonesRest[0];
+            const rigRightEar = char.opFaceBonesRest[16];
+            const rigChin = char.opFaceBonesRest[8];
+            const rigNose = char.opFaceBonesRest[27]; 
+
+            if (rigLeftEar && rigRightEar && rigChin && rigNose) {
+                const rigWidth = rigLeftEar.distanceTo(rigRightEar) || 13.8;
+                const rigHeight = rigChin.distanceTo(rigNose) || 15.0;
+
+                const mpZero = mocap.frames[0];
+                const mpWidth = Math.hypot(mpZero[16].x - mpZero[0].x, mpZero[16].y - mpZero[0].y, mpZero[16].z - mpZero[0].z) || 1.0;
+                const mpHeight = Math.hypot(mpZero[27].x - mpZero[8].x, mpZero[27].y - mpZero[8].y, mpZero[27].z - mpZero[8].z) || 1.0;
+
+                const amp = binding.amplitude !== undefined ? binding.amplitude : 1.0;
+                const scaleX = (rigWidth / mpWidth) * amp;
+                const scaleY = (rigHeight / mpHeight) * amp;
+                const scaleZ = scaleX;
+
+                pArr.forEach((p, i) => {
+                    const bone = char.opFaceBones[i];
+                    const rest = char.opFaceBonesRest[i];
+                    
+                    if (bone && rest) {
+                        const p0 = pArrZero[i];
+                        const dx = p.x - p0.x;
+                        const dy = p.y - p0.y;
+                        const dz = p.z - p0.z;
+
+                        bone.position.set(
+                            rest.x + (dx * scaleX),
+                            rest.y + (-dy * scaleY),
+                            rest.z + (-dz * scaleZ)
+                        );
+                    }
+                });
+            }
+        });
     }
 
     handleKeyDown(e) {
@@ -933,7 +1191,7 @@ class YedpViewport {
             return b;
         };
 
-        const pathMove = `<path d="M5 9l-3 3 3 3M9 5l3-3 3 3M9 19l3 3 3-3M19 9l3 3-3 3M2 12h20M12 2v20"/>`;
+        const pathMove = `<path d="M5 9l-3 3 3 3M9 5l3-3 3 3M9 19l3 3-3 3M19 9l3 3-3 3M2 12h20M12 2v20"/>`;
         const pathRot = `<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>`;
         const pathScale = `<path d="M21 3l-6 6"/><path d="M21 3v6"/><path d="M21 3h-6"/><path d="M3 21l6-6"/><path d="M3 21v-6"/><path d="M3 21h6"/><path d="M14 10l-4 4"/>`;
         const pathDeselect = `<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>`;
@@ -1000,7 +1258,7 @@ class YedpViewport {
                         if (this.isCameraOverride && ovrChk) {
                             ovrChk.checked = false;
                             this.isCameraOverride = false;
-                            this.controls.enabled = true;
+                            this.controls.enabled = true; 
                         }
                         break;
                 }
@@ -1057,12 +1315,14 @@ class YedpViewport {
             return { wrap, head, content };
         };
 
-        // UI SVG Icons
         const iconTransform = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>`;
         const iconCamera = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>`;
         const iconLighting = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`;
         const iconChars = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>`;
         const iconEnv = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
+        const iconMocap = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="3"></circle></svg>`;
+
+        const stopEvent = e => e.stopPropagation();
 
         // TRANSFORM
         const transCol = createCollapsible(`${iconTransform} Transform`, true);
@@ -1073,12 +1333,14 @@ class YedpViewport {
                 const inp = document.createElement("input"); inp.type = "number"; inp.step = "0.1";
                 Object.assign(inp.style, { flex: "1", width: "0", background: "#111", color: "#fff", border: "1px solid #444", fontSize: "10px", padding: "2px" });
                 inp.onchange = () => { this.updateObjectFromTransformUI(); this.forceUpdateFrame(); };
+                inp.addEventListener('keydown', stopEvent); inp.addEventListener('keyup', stopEvent);
+                inp.addEventListener('keypress', stopEvent); inp.addEventListener('mousedown', stopEvent);
+                inp.addEventListener('pointerdown', stopEvent);
                 this.uiTransformInputs[k] = inp; r.appendChild(inp);
             });
             return r;
         };
         transCol.content.append(tRow("Pos", ['px', 'py', 'pz']), tRow("Rot", ['rx', 'ry', 'rz']), tRow("Scl", ['sx', 'sy', 'sz']));
-        this.uiSidebar.appendChild(transCol.wrap);
 
         // CAMERA
         const camCol = createCollapsible(`${iconCamera} Camera`, false);
@@ -1102,6 +1364,7 @@ class YedpViewport {
         const valFov = document.createElement("input"); valFov.type = "number"; valFov.min = 10; valFov.max = 120; valFov.value = this.perspCam.fov; 
         valFov.id = "inp-cam-fov-val";
         Object.assign(valFov.style, { fontSize: "10px", color: "#00d2ff", width: "36px", background: "#111", border: "1px solid #444", padding: "1px 2px", borderRadius: "2px", textAlign: "right" });
+        valFov.addEventListener('keydown', stopEvent); valFov.addEventListener('mousedown', stopEvent);
         
         fovContainer.append(lblFov, sldFov, valFov);
         camSettingsRow.append(btnSelCam, lblOrtho, fovContainer);
@@ -1149,7 +1412,6 @@ class YedpViewport {
         };
         camRow1.append(btnSetStart, btnSetEnd); camRow2.append(selEase, btnClearCam);
 
-        // Custom Camera Import Block
         const camImportRow = document.createElement("div");
         Object.assign(camImportRow.style, { display: "flex", gap: "4px", alignItems: "center", marginTop: "8px", borderTop: "1px solid #333", paddingTop: "8px" });
         
@@ -1173,7 +1435,6 @@ class YedpViewport {
         selCamAnim.onchange = (e) => { this.loadCameraAnim(e.target.value); };
         camImportRow.append(lblOverride, selCamAnim);
 
-        // FIX: FBX Maya Camera Local Offset logic
         const camImportFixRow = document.createElement("div");
         Object.assign(camImportFixRow.style, { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px", marginTop: "4px" });
         
@@ -1184,6 +1445,8 @@ class YedpViewport {
             inp.id = id;
             Object.assign(inp.style, { width: "100%", background: "#111", color: "#fff", border: "1px solid #444", fontSize: "9px", padding: "1px" });
             inp.onchange = callback;
+            inp.addEventListener('keydown', stopEvent); inp.addEventListener('keyup', stopEvent);
+            inp.addEventListener('keypress', stopEvent); inp.addEventListener('mousedown', stopEvent);
             const label = document.createElement("span"); label.innerText = lbl; label.style.width = "20px";
             wrap.append(label, inp);
             return wrap;
@@ -1198,7 +1461,6 @@ class YedpViewport {
         camImportFixRow.append(rxWrap, ryWrap, rzWrap, scWrap);
 
         camCol.content.append(camSettingsRow, camRow1, camRow2, camImportRow, camImportFixRow);
-        this.uiSidebar.appendChild(camCol.wrap);
 
         // LIGHTING
         const lightCol = createCollapsible(`${iconLighting} Lighting`, false);
@@ -1209,7 +1471,6 @@ class YedpViewport {
         this.uiLightList = document.createElement("div");
         this.uiLightList.style.display = "flex"; this.uiLightList.style.flexDirection = "column"; this.uiLightList.style.gap = "6px";
         lightCol.content.appendChild(this.uiLightList);
-        this.uiSidebar.appendChild(lightCol.wrap);
 
         // CHARACTERS
         const charCol = createCollapsible(`${iconChars} Characters`, true);
@@ -1220,7 +1481,288 @@ class YedpViewport {
         this.uiCharList = document.createElement("div");
         this.uiCharList.style.display = "flex"; this.uiCharList.style.flexDirection = "column"; this.uiCharList.style.gap = "6px";
         charCol.content.appendChild(this.uiCharList);
-        this.uiSidebar.appendChild(charCol.wrap);
+
+        // MOCAP
+        const mocapCol = createCollapsible(`${iconMocap} Motion Capture`, false);
+        
+        const mocapPrevWrapper = document.createElement("div");
+        Object.assign(mocapPrevWrapper.style, { position: "relative", width: "100%", background: "#000", border: "1px solid #444", borderRadius: "4px", aspectRatio: "16/9", display: "flex", justifyContent: "center", alignItems: "center", overflow: "hidden" });
+        this.mocapVideoEl = document.createElement("video");
+        Object.assign(this.mocapVideoEl.style, { width: "100%", height: "100%", objectFit: "contain", display: "none" }); 
+        this.mocapVideoEl.setAttribute("playsinline", ""); this.mocapVideoEl.muted = true;
+        this.mocapCanvasEl = document.createElement("canvas");
+        Object.assign(this.mocapCanvasEl.style, { position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "contain" });
+        
+        const mocapOverlay = document.createElement("div");
+        Object.assign(mocapOverlay.style, { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", fontSize: "48px", fontWeight: "bold", color: "white", textShadow: "0px 0px 10px black", pointerEvents: "none", display: "none", zIndex: "50" });
+        this.mocapOverlay = mocapOverlay;
+
+        const mocapStatus = document.createElement("div");
+        Object.assign(mocapStatus.style, { position: "absolute", bottom: "4px", left: "4px", fontSize: "9px", color: "#0f0", background: "rgba(0,0,0,0.6)", padding: "2px 4px", borderRadius: "2px" });
+        mocapStatus.innerText = "Inactive";
+        this.debugMocapText = mocapStatus;
+        mocapPrevWrapper.append(this.mocapVideoEl, this.mocapCanvasEl, this.mocapOverlay, mocapStatus);
+        
+        const mocapCtrlRow1 = document.createElement("div");
+        mocapCtrlRow1.style.display = "flex"; mocapCtrlRow1.style.gap = "4px"; mocapCtrlRow1.style.marginBottom = "4px";
+        const selSource = document.createElement("select");
+        selSource.id = "mocap-sel-source"; 
+        Object.assign(selSource.style, { flex: "1", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px", width: "0" });
+        selSource.add(new Option("Webcam", "webcam")); selSource.add(new Option("Video File", "video"));
+        
+        const fileIn = document.createElement("input"); fileIn.type = "file"; fileIn.accept = "video/*"; fileIn.style.display = "none";
+        
+        const btnAction = createBtn("📷 Start", "#242", "#363");
+        const btnStop = createBtn("⏹ Stop", "#422", "#633");
+        const btnRec = createBtn("🔴 Rec", "#511", "#811");
+        btnRec.disabled = true; btnRec.style.opacity = "0.5";
+
+        mocapCtrlRow1.append(selSource, fileIn, btnAction, btnStop, btnRec);
+
+        const mocapCtrlRow2 = document.createElement("div");
+        mocapCtrlRow2.style.display = "none"; mocapCtrlRow2.style.gap = "4px"; mocapCtrlRow2.style.marginBottom = "4px";
+        mocapCtrlRow2.style.alignItems = "center";
+        
+        const btnPlayPause = createBtn("⏸", "#333", "#555");
+        btnPlayPause.style.flex = "none"; btnPlayPause.style.width = "30px"; btnPlayPause.style.padding = "2px";
+        const vidTimeline = document.createElement("input");
+        vidTimeline.type = "range"; vidTimeline.min = 0; vidTimeline.max = 100; vidTimeline.value = 0;
+        vidTimeline.style.flex = "1";
+        
+        mocapCtrlRow2.append(btnPlayPause, vidTimeline);
+
+        selSource.onchange = () => {
+            if (selSource.value === "video") {
+                btnAction.innerText = "📂 Load";
+                mocapCtrlRow2.style.display = "flex";
+                this.mocapVideoEl.style.transform = "none"; 
+            } else {
+                btnAction.innerText = "📷 Start";
+                mocapCtrlRow2.style.display = "none";
+                this.mocapVideoEl.style.transform = "scaleX(-1)"; 
+            }
+            btnStop.click(); 
+        };
+
+        this.mocapVideoEl.style.transform = "scaleX(-1)";
+
+        btnAction.onclick = async () => {
+            await this.initMediaPipe();
+            if (!this.visionLib) return;
+
+            if (selSource.value === "webcam") {
+                if (this.isMocapActive) return;
+                try {
+                    this.mocapMediaStream = await navigator.mediaDevices.getUserMedia({video: true});
+                    this.mocapVideoEl.srcObject = this.mocapMediaStream;
+                    this.mocapVideoEl.onloadedmetadata = () => {
+                        this.mocapVideoEl.play(); this.isMocapActive = true; 
+                        btnRec.disabled = false; btnRec.style.opacity = "1.0";
+                        this.mocapLoop();
+                    };
+                } catch(e) { alert("Webcam error: " + e.message); }
+            } else {
+                fileIn.click();
+            }
+        };
+
+        fileIn.onchange = (e) => {
+            const f = e.target.files[0]; if(!f) return;
+            if(this.mocapVideoEl.src && this.mocapVideoEl.src.startsWith('blob:')) {
+                URL.revokeObjectURL(this.mocapVideoEl.src);
+            }
+            this.mocapVideoEl.src = URL.createObjectURL(f);
+            this.mocapVideoEl.onloadedmetadata = () => {
+                this.mocapVideoEl.play(); this.isMocapActive = true;
+                btnRec.disabled = false; btnRec.style.opacity = "1.0";
+                btnPlayPause.innerText = "⏸";
+                this.mocapLoop(); 
+            }
+        };
+
+        btnPlayPause.onclick = () => {
+            if (this.mocapVideoEl.paused) {
+                this.mocapVideoEl.play(); btnPlayPause.innerText = "⏸";
+            } else {
+                this.mocapVideoEl.pause(); btnPlayPause.innerText = "▶";
+            }
+        };
+
+        vidTimeline.oninput = (e) => {
+            if (this.mocapVideoEl.duration) {
+                this.mocapVideoEl.currentTime = (e.target.value / 100) * this.mocapVideoEl.duration;
+            }
+        };
+
+        btnStop.onclick = () => {
+            this.isMocapActive = false;
+            this.isMocapStarting = false;
+            if (this.isMocapRecording) btnRec.click(); 
+            if (this.mocapTimer) { clearInterval(this.mocapTimer); this.mocapOverlay.style.display = "none"; }
+            if (this.mocapMediaStream) this.mocapMediaStream.getTracks().forEach(t=>t.stop());
+            this.mocapVideoEl.pause();
+            this.mocapVideoEl.srcObject = null; this.mocapVideoEl.removeAttribute('src');
+            this.mocapCanvasEl.getContext("2d").clearRect(0,0,this.mocapCanvasEl.width,this.mocapCanvasEl.height);
+            this.debugMocapText.innerText = "Inactive";
+            btnRec.disabled = true; btnRec.style.opacity = "0.5";
+            this.currentMocapSession = null;
+        };
+
+        btnRec.onclick = () => {
+            if (!this.isMocapActive && selSource.value !== "video") return;
+            
+            if (!this.isMocapRecording) {
+                if (selSource.value === "video") {
+                    this.isMocapRecording = true;
+                    btnRec.disabled = true;
+                    btnRec.innerText = "Processing...";
+                    btnRec.style.background = "#811";
+                    this.mocapVideoEl.pause();
+                    btnPlayPause.innerText = "▶";
+                    
+                    this.currentMocapSession = {
+                        id: `mocap_${Date.now()}`,
+                        name: `Capture ${this.recordedMocaps.length + 1}`,
+                        frames: [], duration: 0, fps: 30
+                    };
+                    
+                    const duration = this.mocapVideoEl.duration;
+                    const FPS = 30;
+                    const step = 1/FPS;
+                    let currentTime = 0;
+                    
+                    const w = this.mocapVideoEl.videoWidth || 640;
+                    const h = this.mocapVideoEl.videoHeight || 480;
+
+                    const wasActive = this.isMocapActive;
+                    this.isMocapActive = false; 
+
+                    let monotonicTime = performance.now();
+
+                    const processFrame = async () => {
+                        if (currentTime >= duration) {
+                            this.currentMocapSession.duration = this.currentMocapSession.frames.length / FPS;
+                            this.recordedMocaps.push(this.currentMocapSession);
+                            this.syncMocapDropdowns();
+                            this.saveMocapToServer(this.currentMocapSession); 
+                            this.debugMocapText.innerText = `Saved (${this.currentMocapSession.frames.length}f)`;
+                            
+                            this.isMocapRecording = false;
+                            this.currentMocapSession = null;
+                            btnRec.disabled = false;
+                            btnRec.innerText = "🔴 Rec";
+                            btnRec.style.background = "#511";
+                            this.isMocapActive = wasActive;
+                            if(this.isMocapActive) this.mocapLoop();
+                            return;
+                        }
+
+                        await new Promise(r => {
+                            let done = false;
+                            const onSeek = () => { if(done)return; done=true; this.mocapVideoEl.removeEventListener('seeked', onSeek); r(); };
+                            this.mocapVideoEl.addEventListener('seeked', onSeek);
+                            this.mocapVideoEl.currentTime = currentTime;
+                            setTimeout(() => { if(!done) onSeek(); }, 500); 
+                        });
+
+                        monotonicTime += (1000 / FPS); 
+                        
+                        const ctx = this.mocapCanvasEl.getContext("2d");
+                        ctx.save();
+                        ctx.drawImage(this.mocapVideoEl, 0, 0, w, h);
+                        ctx.restore();
+
+                        try {
+                            const res = this.faceLandmarker.detectForVideo(this.mocapCanvasEl, monotonicTime);
+                            if (res.faceLandmarks && res.faceLandmarks.length > 0) {
+                                const face = res.faceLandmarks[0];
+                                
+                                ctx.fillStyle = "#0f0";
+                                MP_TO_OP_FACE.forEach(idx => {
+                                    const p = face[idx];
+                                    ctx.beginPath();
+                                    ctx.arc(p.x * w, p.y * h, 2, 0, 2 * Math.PI);
+                                    ctx.fill();
+                                });
+
+                                const framePoints = this.extractFaceData(face, w, h);
+                                this.currentMocapSession.frames.push(framePoints);
+                            } else if (this.currentMocapSession.frames.length > 0) {
+                                this.currentMocapSession.frames.push(this.currentMocapSession.frames[this.currentMocapSession.frames.length-1]);
+                            }
+                        } catch(e) {}
+                        
+                        this.debugMocapText.innerText = `Processing: ${Math.round((currentTime/duration)*100)}%`;
+                        vidTimeline.value = (currentTime/duration)*100;
+                        
+                        currentTime += step;
+                        setTimeout(processFrame, 1); 
+                    };
+                    processFrame();
+
+                } else {
+                    if (this.isMocapStarting) return; 
+                    this.isMocapStarting = true;
+                    
+                    let c = 3;
+                    this.debugMocapText.innerText = "Starting in 3...";
+                    btnRec.disabled = true; btnRec.style.opacity = "0.5";
+                    
+                    this.mocapOverlay.innerText = c;
+                    this.mocapOverlay.style.display = "block";
+
+                    this.mocapTimer = setInterval(() => {
+                        c--;
+                        if(c > 0) {
+                            this.debugMocapText.innerText = `Starting in ${c}...`;
+                            this.mocapOverlay.innerText = c;
+                        } else {
+                            clearInterval(this.mocapTimer);
+                            this.isMocapStarting = false;
+                            this.mocapOverlay.style.display = "none";
+                            btnRec.disabled = false; btnRec.style.opacity = "1.0";
+                            
+                            this.isMocapRecording = true;
+                            btnRec.innerText = "⬛ Save";
+                            btnRec.style.background = "#811";
+                            this.currentMocapSession = {
+                                id: `mocap_${Date.now()}`,
+                                name: `Capture ${this.recordedMocaps.length + 1}`,
+                                frames: [], duration: 0, fps: 30, startTime: performance.now()
+                            };
+                            this.debugMocapText.innerText = "🔴 RECORDING...";
+                        }
+                    }, 1000);
+                }
+
+            } else {
+                this.isMocapRecording = false;
+                btnRec.innerText = "🔴 Rec"; btnRec.style.background = "#511";
+                this.debugMocapText.innerText = "Tracking";
+                if (this.currentMocapSession && this.currentMocapSession.frames.length > 0) {
+                    const elapsed = (performance.now() - this.currentMocapSession.startTime) / 1000;
+                    this.currentMocapSession.duration = elapsed;
+                    this.currentMocapSession.fps = this.currentMocapSession.frames.length / elapsed;
+                    this.recordedMocaps.push(this.currentMocapSession);
+                    this.syncMocapDropdowns();
+                    this.saveMocapToServer(this.currentMocapSession); 
+                    this.debugMocapText.innerText = `Saved (${this.currentMocapSession.frames.length}f)`;
+                } else {
+                    this.debugMocapText.innerText = "Empty capture discarded.";
+                }
+                this.currentMocapSession = null;
+            }
+        }
+
+        const btnAddMocapBinding = createBtn("+ Add Face Bind", "#255", "#377");
+        btnAddMocapBinding.style.flex = "none"; btnAddMocapBinding.style.padding = "2px 6px"; btnAddMocapBinding.style.fontSize = "9px";
+        btnAddMocapBinding.style.marginTop = "8px";
+        btnAddMocapBinding.onclick = (e) => { e.stopPropagation(); this.addMocapBinding(); };
+        
+        this.uiMocapList = document.createElement("div");
+        this.uiMocapList.style.display = "flex"; this.uiMocapList.style.flexDirection = "column"; this.uiMocapList.style.gap = "6px";
+
+        mocapCol.content.append(mocapPrevWrapper, mocapCtrlRow1, mocapCtrlRow2, btnAddMocapBinding, this.uiMocapList);
 
         // ENVIRONMENTS
         const envCol = createCollapsible(`${iconEnv} Environments`, true);
@@ -1231,9 +1773,263 @@ class YedpViewport {
         this.uiEnvList = document.createElement("div");
         this.uiEnvList.style.display = "flex"; this.uiEnvList.style.flexDirection = "column"; this.uiEnvList.style.gap = "6px";
         envCol.content.appendChild(this.uiEnvList);
-        this.uiSidebar.appendChild(envCol.wrap);
         
+        this.uiSidebar.appendChild(transCol.wrap);
+        this.uiSidebar.appendChild(camCol.wrap);
+        this.uiSidebar.appendChild(lightCol.wrap);
+        this.uiSidebar.appendChild(charCol.wrap);
+        this.uiSidebar.appendChild(mocapCol.wrap); 
+        this.uiSidebar.appendChild(envCol.wrap);
+
         this.updateTransformUIFromObject();
+    }
+
+    // --- LOGIC: DATA FETCHING & SAVING MOCAP ---
+    async fetchMocaps() {
+        try {
+            const res = await api.fetchApi("/yedp/get_mocaps");
+            const data = await res.json();
+            if (data.files && data.files.length > 0) {
+                let updated = false;
+                for (const file of data.files) {
+                    try {
+                        const url = `/view?filename=${file}&type=input&subfolder=yedp_mocap&t=${Date.now()}`;
+                        const req = await fetch(url);
+                        const mocapData = await req.json();
+                        
+                        if (!this.recordedMocaps.find(m => m.id === mocapData.id)) {
+                            this.recordedMocaps.push(mocapData);
+                            updated = true;
+                        }
+                    } catch (err) {
+                        console.error(`[Yedp] Failed to parse mocap JSON file: ${file}`, err);
+                    }
+                }
+                if (updated) this.syncMocapDropdowns();
+            }
+        } catch(e) { console.error("Failed to fetch mocaps.", e); }
+    }
+
+    async saveMocapToServer(mocapData) {
+        try {
+            const res = await api.fetchApi("/yedp/save_mocap", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(mocapData)
+            });
+            const data = await res.json();
+            if (data.status === "success") {
+                console.log(`[Yedp] Saved mocap to file: ${data.file}`);
+            }
+        } catch (e) {
+            console.error("[Yedp] Failed to save mocap to disk", e);
+        }
+    }
+
+    // --- LOGIC: MOCAP & MEDIAPIPE ---
+    async initMediaPipe() {
+        if (this.visionLib) return;
+        this.debugMocapText.innerText = "Loading MediaPipe...";
+        try {
+            const visionUrl = new URL("./tasks_vision.js", this.baseUrl).href;
+            this.visionLib = await import(visionUrl);
+            const visionTask = await this.visionLib.FilesetResolver.forVisionTasks(this.baseUrl);
+            const faceTaskUrl = new URL("./face_landmarker.task", this.baseUrl).href;
+            
+            this.faceLandmarker = await this.visionLib.FaceLandmarker.createFromOptions(visionTask, {
+                baseOptions: { modelAssetPath: faceTaskUrl, delegate: "GPU" },
+                runningMode: "VIDEO", numFaces: 1
+            });
+            this.debugMocapText.innerText = "Ready";
+        } catch(e) {
+            console.error(e);
+            this.debugMocapText.innerText = "Failed to load MediaPipe";
+            this.debugMocapText.style.color = "red";
+        }
+    }
+
+    extractFaceData(face, w, h) {
+        const toVec3 = (mpPoint) => new this.THREE.Vector3(mpPoint.x * w, mpPoint.y * h, mpPoint.z * w);
+        
+        const pLeft = toVec3(face[234]);       
+        const pRight = toVec3(face[454]);      
+        const pTop = toVec3(face[10]);         
+        const pNoseBridge = toVec3(face[168]); 
+        const pOrigin = toVec3(face[1]);       
+        
+        const xAxis = new this.THREE.Vector3().subVectors(pRight, pLeft).normalize();
+        const yAxisTmp = new this.THREE.Vector3().subVectors(pNoseBridge, pTop).normalize(); 
+        const zAxis = new this.THREE.Vector3().crossVectors(xAxis, yAxisTmp).normalize();
+        const yAxis = new this.THREE.Vector3().crossVectors(zAxis, xAxis).normalize();
+        
+        const faceMatrixInv = new this.THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis).invert();
+        
+        return MP_TO_OP_FACE.map(idx => {
+            const p = toVec3(face[idx]);
+            p.sub(pOrigin); 
+            p.applyMatrix4(faceMatrixInv); 
+            return { x: p.x, y: p.y, z: p.z }; 
+        });
+    }
+
+    mocapLoop() {
+        if (!this.isMocapActive) return;
+        requestAnimationFrame(() => this.mocapLoop());
+        
+        if (this.mocapVideoEl.readyState >= 2) {
+            if (this.mocapVideoEl.duration) {
+                const vidTimeline = this.container.querySelector("input[type='range']");
+                if (vidTimeline && !this.mocapVideoEl.paused) {
+                    vidTimeline.value = (this.mocapVideoEl.currentTime / this.mocapVideoEl.duration) * 100;
+                }
+            }
+
+            const w = this.mocapVideoEl.videoWidth || 640;
+            const h = this.mocapVideoEl.videoHeight || 480;
+            
+            const sourceSel = this.container.querySelector("#mocap-sel-source");
+            const isWebcam = sourceSel ? sourceSel.value === "webcam" : true; 
+
+            if (this.mocapCanvasEl.width !== w) {
+                this.mocapCanvasEl.width = w; 
+                this.mocapCanvasEl.height = h;
+            }
+
+            const ctx = this.mocapCanvasEl.getContext("2d");
+            ctx.save();
+            if (isWebcam) {
+                ctx.scale(-1, 1); 
+                ctx.translate(-w, 0);
+            }
+            ctx.drawImage(this.mocapVideoEl, 0, 0, w, h);
+            ctx.restore();
+
+            if (this.faceLandmarker) {
+                const res = this.faceLandmarker.detectForVideo(this.mocapVideoEl, performance.now());
+                if (res.faceLandmarks && res.faceLandmarks.length > 0) {
+                    const face = res.faceLandmarks[0];
+                    
+                    ctx.fillStyle = "#0f0";
+                    MP_TO_OP_FACE.forEach(idx => {
+                        const p = face[idx];
+                        ctx.beginPath();
+                        if (isWebcam) {
+                            ctx.arc((1 - p.x) * w, p.y * h, 2, 0, 2 * Math.PI);
+                        } else {
+                            ctx.arc(p.x * w, p.y * h, 2, 0, 2 * Math.PI);
+                        }
+                        ctx.fill();
+                    });
+
+                    if (this.isMocapRecording && this.currentMocapSession && !this.mocapVideoEl.paused && isWebcam) {
+                        const framePoints = this.extractFaceData(face, w, h);
+                        this.currentMocapSession.frames.push(framePoints);
+                    }
+                }
+            }
+        }
+    }
+
+    addMocapBinding() {
+        this.mocapBindingCounter++;
+        const id = this.mocapBindingCounter;
+        this.mocapBindings.push({
+            id: id,
+            charId: this.characters.length > 0 ? this.characters[0].id : null,
+            mocapId: null,
+            amplitude: 1.0, 
+            loop: true
+        });
+        this.renderMocapBindings();
+        this.forceUpdateFrame();
+    }
+
+    removeMocapBinding(id) {
+        this.mocapBindings = this.mocapBindings.filter(b => b.id !== id);
+        this.renderMocapBindings();
+        this.forceUpdateFrame();
+    }
+
+    syncMocapDropdowns() {
+        this.uiMocapDropdowns.forEach(sel => {
+            const current = sel.value;
+            sel.innerHTML = '<option value="none">-- Select Mocap --</option>';
+            this.recordedMocaps.forEach(m => sel.add(new Option(m.name, m.id)));
+            if (this.recordedMocaps.find(m => m.id === current)) sel.value = current;
+        });
+    }
+
+    renderMocapBindings() {
+        this.uiMocapList.innerHTML = "";
+        this.uiMocapDropdowns = [];
+        
+        const stopEvent = e => e.stopPropagation();
+
+        this.mocapBindings.forEach(b => {
+            const card = document.createElement("div"); 
+            Object.assign(card.style, { background: "#222", border: "1px solid #444", borderRadius: "4px", padding: "6px" });
+            
+            const head = document.createElement("div"); head.style.display = "flex"; head.style.justifyContent = "space-between"; head.style.marginBottom = "4px";
+            head.innerHTML = `<span style="font-weight:bold; font-size:10px; color:#00d2ff;">Face Rig Bind</span>`;
+            const btnDel = document.createElement("button"); btnDel.innerText = "X"; Object.assign(btnDel.style, { background: "#622", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px" }); 
+            btnDel.onclick = () => this.removeMocapBinding(b.id);
+            head.appendChild(btnDel);
+
+            const rowSel = document.createElement("div"); rowSel.style.display = "flex"; rowSel.style.gap = "4px"; rowSel.style.marginBottom = "4px";
+            
+            const selChar = document.createElement("select");
+            Object.assign(selChar.style, { flex: "1", width: "0", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "9px", padding: "2px" });
+            selChar.add(new Option("-- Target --", "none"));
+            this.characters.forEach(c => selChar.add(new Option(`Char ${c.id}`, c.id)));
+            selChar.value = b.charId || "none";
+            selChar.onchange = (e) => { b.charId = e.target.value === "none" ? null : parseInt(e.target.value); this.forceUpdateFrame(); };
+
+            const selMocap = document.createElement("select");
+            Object.assign(selMocap.style, { flex: "1", width: "0", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "9px", padding: "2px" });
+            selMocap.add(new Option("-- Select Mocap --", "none"));
+            this.recordedMocaps.forEach(m => selMocap.add(new Option(m.name, m.id)));
+            selMocap.value = b.mocapId || "none";
+            selMocap.onchange = (e) => { b.mocapId = e.target.value === "none" ? null : e.target.value; this.forceUpdateFrame(); };
+            this.uiMocapDropdowns.push(selMocap);
+
+            rowSel.append(selChar, selMocap);
+
+            const rowScl = document.createElement("div"); 
+            rowScl.style.display = "flex"; rowScl.style.alignItems = "center"; rowScl.style.gap = "4px";
+            
+            const s = document.createElement("span"); s.innerText = "Amp"; s.style.fontSize="9px"; s.style.color="#888"; s.style.width="20px";
+            
+            const currentAmp = b.amplitude !== undefined ? b.amplitude : (b.scale !== undefined ? b.scale : 1.0);
+            
+            const sld = document.createElement("input"); 
+            sld.type = "range"; sld.min = "0.0"; sld.max = "3.0"; sld.step = "0.05"; sld.value = currentAmp;
+            Object.assign(sld.style, { flex: "1", width: "0" });
+            
+            const inp = document.createElement("input"); 
+            inp.type="number"; inp.step="0.05"; inp.value = currentAmp; 
+            Object.assign(inp.style, { width:"30px", background:"#111", color:"#00d2ff", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right" }); 
+            
+            const syncUI = (v) => { 
+                b.amplitude = v; sld.value = v; inp.value = v; 
+                this.forceUpdateFrame(); 
+            };
+            
+            sld.oninput = (e) => syncUI(parseFloat(e.target.value));
+            inp.onchange = (e) => syncUI(parseFloat(e.target.value)||1.0);
+            
+            inp.addEventListener('keydown', stopEvent); inp.addEventListener('keyup', stopEvent);
+            inp.addEventListener('keypress', stopEvent); inp.addEventListener('pointerdown', stopEvent);
+            inp.addEventListener('mousedown', stopEvent);
+
+            const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px"; lblLoop.style.fontSize = "9px"; lblLoop.style.color = "#ccc";
+            const chkLoop = document.createElement("input"); chkLoop.type = "checkbox"; chkLoop.checked = b.loop !== false;
+            chkLoop.onchange = (e) => { b.loop = e.target.checked; this.forceUpdateFrame(); };
+            lblLoop.append(chkLoop, "Loop");
+
+            rowScl.append(s, sld, inp, lblLoop);
+            card.append(head, rowSel, rowScl);
+            this.uiMocapList.appendChild(card);
+        });
     }
 
     // --- SELECTION & TRANSFORM ---
@@ -1359,13 +2155,11 @@ class YedpViewport {
             }
         });
         
-        // Add defaults only if we aren't loading a saved scene
         if (!this.node.saved_scene_state) {
             this.addCharacter();
         }
     }
 
-    // --- LOGIC: CAMERA ANIM ---
     async loadCameraAnim(filename) {
         if(!filename || filename === "none") {
             this.cameraMixer?.stopAllAction();
@@ -1453,6 +2247,9 @@ class YedpViewport {
     }
     renderLightCards() {
         this.uiLightList.innerHTML = "";
+        
+        const stopEvent = e => e.stopPropagation();
+
         this.lights.forEach(l => {
             const card = document.createElement("div"); card.dataset.id = l.id;
             Object.assign(card.style, { background: "#222", border: "1px solid #444", borderRadius: "4px", padding: "6px", cursor: "pointer", transition: "border-color 0.2s" });
@@ -1476,13 +2273,18 @@ class YedpViewport {
 
             const inpCol = document.createElement("input"); inpCol.type = "color"; inpCol.value = l.color; inpCol.style.width = "100%"; inpCol.style.height = "16px"; inpCol.style.padding = "0"; inpCol.style.border = "none"; inpCol.onchange = (e) => { l.color = e.target.value; this.updateLightType(l); };
             const inpInt = document.createElement("input"); inpInt.type = "number"; inpInt.step = "0.1"; inpInt.value = l.intensity; Object.assign(inpInt.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" }); inpInt.onchange = (e) => { l.intensity = parseFloat(e.target.value); this.updateLightType(l); };
+            inpInt.addEventListener('keydown', stopEvent); inpInt.addEventListener('mousedown', stopEvent);
             ctrls.append(wrap("Col", inpCol), wrap("Int", inpInt));
 
             if (l.type === 'point' || l.type === 'spot') {
-                const inpRng = document.createElement("input"); inpRng.type = "number"; inpRng.step = "1"; inpRng.value = l.range; Object.assign(inpRng.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" }); inpRng.onchange = (e) => { l.range = parseFloat(e.target.value); this.updateLightType(l); }; ctrls.append(wrap("Rng", inpRng));
+                const inpRng = document.createElement("input"); inpRng.type = "number"; inpRng.step = "1"; inpRng.value = l.range; Object.assign(inpRng.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" }); inpRng.onchange = (e) => { l.range = parseFloat(e.target.value); this.updateLightType(l); }; 
+                inpRng.addEventListener('keydown', stopEvent); inpRng.addEventListener('mousedown', stopEvent);
+                ctrls.append(wrap("Rng", inpRng));
             }
             if (l.type === 'spot') {
-                const inpAng = document.createElement("input"); inpAng.type = "number"; inpAng.step = "1"; inpAng.value = l.angle; Object.assign(inpAng.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" }); inpAng.onchange = (e) => { l.angle = parseFloat(e.target.value); this.updateLightType(l); }; ctrls.append(wrap("Ang", inpAng));
+                const inpAng = document.createElement("input"); inpAng.type = "number"; inpAng.step = "1"; inpAng.value = l.angle; Object.assign(inpAng.style, { width:"100%", background:"#111", color:"#fff", border:"1px solid #444", fontSize:"10px" }); inpAng.onchange = (e) => { l.angle = parseFloat(e.target.value); this.updateLightType(l); }; 
+                inpAng.addEventListener('keydown', stopEvent); inpAng.addEventListener('mousedown', stopEvent);
+                ctrls.append(wrap("Ang", inpAng));
             }
             if (l.type !== 'ambient') {
                 const lblShad = document.createElement("label"); lblShad.style.fontSize="9px"; lblShad.style.color="#ccc"; lblShad.style.display="flex"; lblShad.style.gap="2px"; lblShad.style.alignItems="center";
@@ -1539,7 +2341,7 @@ class YedpViewport {
             envObj.group.add(targetObj);
             
             targetObj.traverse((child) => {
-                child.visible = true; // Force all nested groups to be visible
+                child.visible = true; 
                 if(child.isMesh || child.isSkinnedMesh || child.type === 'Mesh' || child.type === 'SkinnedMesh') {
                     child.castShadow = true;
                     child.receiveShadow = true;
@@ -1568,8 +2370,8 @@ class YedpViewport {
             if(clip) {
                 envObj.mixer = new this.THREE.AnimationMixer(targetObj);
                 envObj.action = envObj.mixer.clipAction(clip);
-                envObj.action.setLoop(envObj.loop ? this.THREE.LoopRepeat : this.THREE.LoopOnce);
-                envObj.action.clampWhenFinished = !envObj.loop;
+                // BUG FIX: ALWAYS force LoopRepeat. We handle clamping manually in evaluateAnimations to preserve blendshapes.
+                envObj.action.setLoop(this.THREE.LoopRepeat);
                 envObj.action.reset().setEffectiveWeight(1).play();
                 envObj.duration = clip.duration;
             } else {
@@ -1626,7 +2428,10 @@ class YedpViewport {
             const foot = document.createElement("div"); foot.style.display = "flex"; foot.style.justifyContent = "space-between"; foot.style.alignItems = "center";
             const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px";
             const chkLoop = document.createElement("input"); chkLoop.type = "checkbox"; chkLoop.checked = e.loop;
-            chkLoop.onchange = (evt) => { e.loop = evt.target.checked; if(e.action) { e.action.setLoop(e.loop ? this.THREE.LoopRepeat : this.THREE.LoopOnce); e.action.clampWhenFinished = !e.loop; }};
+            chkLoop.onchange = (evt) => { 
+                e.loop = evt.target.checked; 
+                this.forceUpdateFrame();
+            };
             lblLoop.append(chkLoop, "Loop (Anim)");
             
             const lblDur = document.createElement("span");
@@ -1644,6 +2449,9 @@ class YedpViewport {
     // --- LOGIC: CHARACTERS ---
     renderCharacterCards() {
         this.uiCharList.innerHTML = "";
+        
+        const stopEvent = e => e.stopPropagation();
+        
         this.characters.forEach(c => {
             const card = document.createElement("div"); card.dataset.id = c.id;
             Object.assign(card.style, { background: "#222", border: "1px solid #444", borderRadius: "4px", padding: "6px", cursor: "pointer", transition: "border-color 0.2s" });
@@ -1665,11 +2473,99 @@ class YedpViewport {
             meshInfo.style.marginBottom = "4px";
             meshInfo.innerText = `[M:${c.depthMeshesM.length} | F:${c.depthMeshesF.length} | Pose:${c.poseMeshes.length}]`;
             
-            const selAnim = document.createElement("select");
-            Object.assign(selAnim.style, { width: "100%", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px", marginBottom: "4px" });
-            this.availableAnimations.forEach(anim => selAnim.add(new Option(anim, anim)));
-            selAnim.value = c.animFile; selAnim.onchange = (e) => this.loadAnimationForChar(c, e.target.value);
+            // MULTI-CLIP SEQUENCER UI
+            const seqWrap = document.createElement("div");
+            Object.assign(seqWrap.style, { display: "flex", flexDirection: "column", gap: "4px", marginBottom: "4px", background: "#1a1a1a", padding: "4px", borderRadius: "3px", border: "1px solid #333" });
+
+            const seqTitle = document.createElement("div");
+            seqTitle.innerText = "Animation Sequence:";
+            seqTitle.style.fontSize = "9px"; seqTitle.style.color = "#888"; seqTitle.style.fontWeight = "bold";
+            seqWrap.appendChild(seqTitle);
+
+            c.animSequence.forEach((item, index) => {
+                const row = document.createElement("div");
+                row.style.display = "flex"; row.style.gap = "4px"; row.style.alignItems = "center";
+                
+                const idxLbl = document.createElement("span");
+                idxLbl.innerText = `${index + 1}.`;
+                idxLbl.style.fontSize = "9px"; idxLbl.style.color = "#666"; idxLbl.style.width = "12px";
+                
+                const selAnim = document.createElement("select");
+                Object.assign(selAnim.style, { flex: "1", width: "0", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px" });
+                this.availableAnimations.forEach(anim => selAnim.add(new Option(anim, anim)));
+                selAnim.value = item.file;
+                selAnim.onchange = (e) => this.loadSequenceAnim(c, item, e.target.value);
+                
+                const btnDelSeq = document.createElement("button");
+                btnDelSeq.innerText = "X";
+                Object.assign(btnDelSeq.style, { background: "#622", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px", padding: "2px 4px" });
+                btnDelSeq.onclick = (evt) => {
+                    evt.stopPropagation();
+                    c.animSequence = c.animSequence.filter(a => a.id !== item.id);
+                    if (item.action) { item.action.stop(); }
+                    this.updateSequenceSchedule(c);
+                    this.renderCharacterCards();
+                    this.forceUpdateFrame();
+                };
+                
+                row.append(idxLbl, selAnim, btnDelSeq);
+                seqWrap.appendChild(row);
+            });
+
+            const btnAddSeq = document.createElement("button");
+            btnAddSeq.innerText = "+ Add Sequence Anim";
+            Object.assign(btnAddSeq.style, { background: "#255", color: "#fff", border: "1px solid #477", borderRadius: "3px", cursor: "pointer", fontSize: "9px", padding: "2px", marginTop: "2px" });
+            btnAddSeq.onclick = (evt) => {
+                evt.stopPropagation();
+                c.addSequenceItem("none");
+                this.renderCharacterCards();
+            };
+            seqWrap.appendChild(btnAddSeq);
+
+            // NEW: Crossfade Control
+            const blendRow = document.createElement("div");
+            blendRow.style.display = "flex"; blendRow.style.alignItems = "center"; blendRow.style.gap = "4px"; blendRow.style.marginTop = "4px";
             
+            const bLbl = document.createElement("span"); bLbl.innerText = "Blend (s)"; bLbl.style.fontSize="9px"; bLbl.style.color="#888"; bLbl.style.width="40px";
+            const bSld = document.createElement("input"); bSld.type = "range"; bSld.min = "0.0"; bSld.max = "2.0"; bSld.step = "0.1"; bSld.value = c.blendDuration; Object.assign(bSld.style, { flex: "1", width: "0" });
+            const bInp = document.createElement("input"); bInp.type = "number"; bInp.step = "0.1"; bInp.value = c.blendDuration; Object.assign(bInp.style, {width:"30px", background:"#111", color:"#00d2ff", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right"});
+            
+            const syncBlend = (v) => {
+                c.blendDuration = v; bSld.value = v; bInp.value = v;
+                this.updateSequenceSchedule(c);
+                const lblDur = this.container.querySelector(`#dur-${c.id}`);
+                if (lblDur) {
+                    const fps = this.getWidgetValue("fps", 24);
+                    lblDur.innerText = c.duration > 0 ? `${Math.floor(c.duration * fps)}f` : "--";
+                }
+                this.forceUpdateFrame();
+            };
+            bSld.oninput = (e) => syncBlend(parseFloat(e.target.value));
+            bInp.onchange = (e) => syncBlend(parseFloat(e.target.value)||0);
+            bInp.addEventListener('keydown', stopEvent); bInp.addEventListener('mousedown', stopEvent);
+            
+            blendRow.append(bLbl, bSld, bInp);
+            seqWrap.appendChild(blendRow);
+            // END MULTI-CLIP UI
+            
+            const faceScaleRow = document.createElement("div");
+            faceScaleRow.style.display = "flex"; faceScaleRow.style.alignItems = "center"; faceScaleRow.style.gap = "4px"; faceScaleRow.style.marginBottom = "4px";
+            
+            const fsLbl = document.createElement("span"); fsLbl.innerText = "Pt Size"; fsLbl.style.fontSize="9px"; fsLbl.style.color="#888"; fsLbl.style.width="35px";
+            const fsSld = document.createElement("input"); fsSld.type = "range"; fsSld.min = "0.1"; fsSld.max = "3.0"; fsSld.step = "0.1"; fsSld.value = c.faceScale; Object.assign(fsSld.style, { flex: "1", width: "0" });
+            const fsInp = document.createElement("input"); fsInp.type = "number"; fsInp.step = "0.1"; fsInp.value = c.faceScale; Object.assign(fsInp.style, {width:"30px", background:"#111", color:"#00d2ff", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right"});
+            
+            const syncFs = (v) => {
+                c.faceScale = v; fsSld.value = v; fsInp.value = v;
+                c.opFaceBones.forEach(b => { if(b) b.scale.setScalar(v); });
+                this.forceUpdateFrame();
+            };
+            fsSld.oninput = (e) => syncFs(parseFloat(e.target.value));
+            fsInp.onchange = (e) => syncFs(parseFloat(e.target.value)||1.0);
+            fsInp.addEventListener('keydown', stopEvent); fsInp.addEventListener('mousedown', stopEvent);
+            
+            faceScaleRow.append(fsLbl, fsSld, fsInp);
+
             const foot = document.createElement("div"); foot.style.display = "flex"; foot.style.justifyContent = "space-between"; foot.style.alignItems = "center";
             const loopBox = document.createElement("div"); loopBox.style.display = "flex"; loopBox.style.alignItems = "center"; loopBox.style.gap = "6px";
             
@@ -1677,25 +2573,45 @@ class YedpViewport {
             Object.assign(btnGender.style, { background: "#111", border: "1px solid #444", borderRadius: "3px", cursor: "pointer", fontSize: "10px", padding: "1px 6px", fontWeight: "bold", color: c.gender === 'F' ? '#ff66b2' : '#66b2ff' });
             btnGender.onclick = () => { c.gender = c.gender === 'M' ? 'F' : 'M'; btnGender.innerText = c.gender; btnGender.style.color = c.gender === 'F' ? '#ff66b2' : '#66b2ff'; this.updateVisibilities(); this.forceUpdateFrame(); };
 
+            const lblFace = document.createElement("label"); lblFace.style.cursor = "pointer"; lblFace.style.display = "flex"; lblFace.style.gap = "2px"; lblFace.style.fontSize = "10px";
+            const chkFace = document.createElement("input"); chkFace.type = "checkbox"; chkFace.checked = c.showFace;
+            chkFace.onchange = (e) => { c.showFace = e.target.checked; this.updateVisibilities(); this.forceUpdateFrame(); };
+            lblFace.append(chkFace, "Face");
+
             const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px";
             const chkLoop = document.createElement("input"); chkLoop.type = "checkbox"; chkLoop.checked = c.loop;
-            chkLoop.onchange = (e) => { c.loop = e.target.checked; if(c.action) { c.action.setLoop(c.loop ? this.THREE.LoopRepeat : this.THREE.LoopOnce); c.action.clampWhenFinished = !c.loop; }};
-            lblLoop.append(chkLoop, "Loop"); loopBox.append(btnGender, lblLoop);
+            chkLoop.onchange = (e) => { 
+                c.loop = e.target.checked; 
+                this.updateSequenceSchedule(c); // Recalculate duration and loops!
+                const lblDur = this.container.querySelector(`#dur-${c.id}`);
+                if (lblDur) {
+                    const fps = this.getWidgetValue("fps", 24);
+                    lblDur.innerText = c.duration > 0 ? `${Math.floor(c.duration * fps)}f` : "--";
+                }
+                this.forceUpdateFrame(); 
+            };
+            lblLoop.append(chkLoop, "Loop"); 
+            
+            loopBox.append(btnGender, lblFace, lblLoop);
 
             const lblDur = document.createElement("span");
             const fps = this.getWidgetValue("fps", 24);
             lblDur.innerText = c.duration > 0 ? `${Math.floor(c.duration * fps)}f` : "--";
             lblDur.id = `dur-${c.id}`; lblDur.style.color = "#888"; lblDur.style.fontFamily = "monospace";
             
-            foot.append(loopBox, lblDur); card.append(head, meshInfo, selAnim, foot); this.uiCharList.appendChild(card);
+            foot.append(loopBox, lblDur); 
+            card.append(head, meshInfo, seqWrap, faceScaleRow, foot); 
+            this.uiCharList.appendChild(card);
         });
         this.refreshSidebarHighlights();
+        this.renderMocapBindings(); 
     }
 
     addCharacter() {
         if (this.characters.length >= 16) { alert("Maximum 16 characters recommended for WebGL performance."); return; }
         this.charCounter++;
         const newChar = new CharacterInstance(this.charCounter, this.baseRig, this.THREE);
+        newChar.addSequenceItem("none"); // Default first empty slot
         this.scene.add(newChar.scene); this.scene.add(newChar.skeletonHelper);
         this.characters.push(newChar);
 
@@ -1714,20 +2630,29 @@ class YedpViewport {
         this.renderCharacterCards();
     }
 
-    async loadAnimationForChar(charObj, filename) {
+    async loadSequenceAnim(charObj, item, filename) {
         const lbl = this.container.querySelector(`#dur-${charObj.id}`);
         if (lbl) lbl.innerText = "Loading...";
 
+        if (item.action) {
+            item.action.stop();
+            item.action = null;
+        }
+
         if(!filename || filename === "none") {
-            charObj.animFile = filename;
-            charObj.mixer.stopAllAction();
-            charObj.action = null;
-            if (lbl) lbl.innerText = "--";
+            item.file = "none";
+            item.duration = 0;
+            this.updateSequenceSchedule(charObj);
+            
+            if (lbl) {
+                const fps = this.getWidgetValue("fps", 24);
+                lbl.innerText = charObj.duration > 0 ? `${Math.floor(charObj.duration * fps)}f` : "--";
+            }
             this.forceUpdateFrame();
             return;
         }
         
-        charObj.animFile = filename;
+        item.file = filename;
         const isFBX = filename.toLowerCase().endsWith(".fbx");
         const isBVH = filename.toLowerCase().endsWith(".bvh");
         const url = `/view?filename=${filename}&type=input&subfolder=yedp_anims&t=${Date.now()}`;
@@ -1746,6 +2671,9 @@ class YedpViewport {
                     const lastDot = t.name.lastIndexOf(".");
                     const prop = t.name.substring(lastDot + 1);
                     const fullBonePath = t.name.substring(0, lastDot);
+                    
+                    if (fullBonePath.includes("OP_Face_") || fullBonePath.toLowerCase().includes("op_face")) return;
+                    
                     const normalizedTrackBone = semanticNormalize(fullBonePath);
                     if (prop === "scale") return; 
                     if(this.semanticMap.has(normalizedTrackBone)) {
@@ -1756,17 +2684,24 @@ class YedpViewport {
                 });
 
                 const cleanClip = new this.THREE.AnimationClip(clip.name, clip.duration, tracks);
-                charObj.mixer.stopAllAction(); charObj.mixer.uncacheRoot(charObj.scene);
                 
-                charObj.action = charObj.mixer.clipAction(cleanClip);
-                charObj.action.setLoop(charObj.loop ? this.THREE.LoopRepeat : this.THREE.LoopOnce);
-                charObj.action.clampWhenFinished = !charObj.loop;
-                charObj.action.reset().setEffectiveWeight(1).play();
-                charObj.duration = cleanClip.duration;
+                item.action = charObj.mixer.clipAction(cleanClip);
+                item.action.setLoop(this.THREE.LoopRepeat);
+                item.action.reset().play();
+                item.action.setEffectiveWeight(0); 
+                item.duration = cleanClip.duration;
                 
-                if (lbl) lbl.innerText = `${Math.floor(charObj.duration * this.getWidgetValue("fps", 24))}f`;
+                this.updateSequenceSchedule(charObj);
                 
-                this.isPlaying = true; const btn = this.container.querySelector("#btn-play"); if(btn) btn.innerText = "⏸";
+                if (lbl) {
+                    const fps = this.getWidgetValue("fps", 24);
+                    lbl.innerText = `${Math.floor(charObj.duration * fps)}f`;
+                }
+                
+                this.isPlaying = true; 
+                const btn = this.container.querySelector("#btn-play"); 
+                if(btn) btn.innerText = "⏸";
+                
                 this.forceUpdateFrame();
             }
         } catch(e) { 
@@ -1874,7 +2809,10 @@ class YedpViewport {
                 else if (isShaded) m.material = m.isSkinnedMesh ? this.matsSkinned.shaded : this.matsStatic.shaded;
                 else m.material = this.originalMaterials.get(m) || m.material;
             });
-            c.poseMeshes.forEach(m => m.visible = !showDepthMeshes);
+            c.poseMeshes.forEach(m => {
+                const isFace = c.poseFaceMeshes.includes(m);
+                m.visible = !showDepthMeshes && (!isFace || c.showFace);
+            });
         });
 
         this.environments.forEach(e => {
@@ -1952,7 +2890,7 @@ class YedpViewport {
         const THREE = this.THREE;
         
         const btnId = isSingleFrame ? '#btn-bake-frame' : '#btn-bake';
-        const originalBtnText = isSingleFrame ? 'BAKE FRAME' : 'BAKE V9.21';
+        const originalBtnText = isSingleFrame ? 'BAKE FRAME' : 'BAKE V9.28';
         const btn = this.container.querySelector(btnId); btn.innerText = "PREPARING...";
         
         this.isBaking = true; this.isPlaying = false;
@@ -2007,7 +2945,10 @@ class YedpViewport {
             const showEnv = ['depth', 'normal', 'shaded'].includes(mode);
 
             this.characters.forEach(c => {
-                c.poseMeshes.forEach(m => m.visible = showPose);
+                c.poseMeshes.forEach(m => {
+                    const isFace = c.poseFaceMeshes.includes(m);
+                    m.visible = showPose && (!isFace || c.showFace);
+                });
                 c.inactiveDepthMeshes.forEach(m => m.visible = false); 
                 c.activeDepthMeshes.forEach(m => m.visible = showDepth);
                 c.skeletonHelper.visible = false; 
@@ -2121,6 +3062,7 @@ class YedpViewport {
     }
 }
 
+// --- COMfyUI EXTENSION REGISTRATION ---
 app.registerExtension({
     name: "Yedp.ActionDirector",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
@@ -2156,6 +3098,11 @@ app.registerExtension({
                 this.onRemoved = function() {
                     if (this.vp) {
                         this.vp.isBaking = false; this.vp.isPlaying = false;
+                        if (this.vp.isMocapActive) {
+                            if (this.vp.mocapTimer) clearInterval(this.vp.mocapTimer);
+                            if (this.vp.mocapMediaStream) this.vp.mocapMediaStream.getTracks().forEach(t=>t.stop());
+                            if (this.vp.mocapVideoEl) { this.vp.mocapVideoEl.pause(); this.vp.mocapVideoEl.srcObject = null; }
+                        }
                         if (this.vp._handleKeyDown) window.removeEventListener('keydown', this.vp._handleKeyDown);
                         if (this.vp.renderer) { this.vp.renderer.dispose(); this.vp.renderer = null; }
                     }
@@ -2163,7 +3110,7 @@ app.registerExtension({
                 return r;
             };
 
-            // NEW: Native ComfyUI Serialization logic!
+            // Native ComfyUI Serialization logic!
             const onSerializeOrig = nodeType.prototype.onSerialize;
             nodeType.prototype.onSerialize = function (o) {
                 if (onSerializeOrig) onSerializeOrig.apply(this, arguments);
