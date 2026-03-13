@@ -1,6 +1,7 @@
 # **🎬 ComfyUI Yedp Action Director**
 
 
+https://github.com/user-attachments/assets/87328a44-5249-42f3-8b54-de18e7545398
 
 https://github.com/user-attachments/assets/9e7d56c9-e2cd-4ff6-a505-93e4eabae959
 
