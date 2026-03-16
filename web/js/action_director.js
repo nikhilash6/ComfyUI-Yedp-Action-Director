@@ -2248,7 +2248,8 @@ class YedpViewport {
                 let animTarget = model.scene || model;
                 
                 this.cameraAnimGroup.add(animTarget);
-                this.cameraMixer = new this.AnimationMixer(animTarget);
+                // BUG FIX: Added 'this.THREE.' which was missing and causing a silent exception
+                this.cameraMixer = new this.THREE.AnimationMixer(animTarget);
                 this.cameraAction = this.cameraMixer.clipAction(clip);
                 this.cameraAction.play();
                 
