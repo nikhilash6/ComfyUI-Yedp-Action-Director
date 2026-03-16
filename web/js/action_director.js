@@ -12,6 +12,7 @@ import { api } from "/scripts/api.js";
  * - Update: Switched to Additive Mocap! MediaPipe now tracks relative deltas from frame 0 and applies them to the Rig's rest pose.
  * - Update: Proportional Auto-Scaling measures the 3D rig's ear-to-ear distance to scale mocap perfectly to any character.
  * - Feature: Added JSON disk-saving and loading for recorded Mocap tracks!
+ * - Feature: Continuous Root Motion Tracking! Automatically strips loop snapping and integrates spatial movement indefinitely. 
  */
 
 const loadThreeJS = async () => {
@@ -168,6 +169,15 @@ class CharacterInstance {
         this.hasFemaleMesh = false; 
         this.faceScale = 1.0; 
 
+        // Root Motion state tracking
+        this.useRootMotion = false;
+        this.rootBone = null;
+        this.continuousPos = new THREE.Vector3();
+        this.lastRawPos = new THREE.Vector3();
+        this.lastDomItem = null;
+        this.lastDomTau = -1;
+        this.lastEvalTime = -1; // Global timeline evaluation tracker
+
         this.poseMeshes = [];
         this.poseFaceMeshes = []; 
         this.depthMeshesM = [];
@@ -182,6 +192,11 @@ class CharacterInstance {
         this.scene.position.set((id - 1) * 1.0, 0, 0);
 
         this.scene.traverse((child) => {
+            // Find Top Level Bone
+            if (child.isBone && !this.rootBone && child.parent && child.parent.type !== 'Bone') {
+                this.rootBone = child;
+            }
+
             if (child.isBone && child.name.includes("OP_Face_")) {
                 const match = child.name.match(/OP_Face_(\d+)/);
                 if (match) {
@@ -388,6 +403,9 @@ class YedpViewport {
         this.isHovered = false;
         this._handleKeyDown = this.handleKeyDown.bind(this);
         window.addEventListener('keydown', this._handleKeyDown);
+        
+        // Reference stored to allow unbinding during cleanup
+        this.resizeObserver = null; 
 
         this.init();
     }
@@ -620,8 +638,8 @@ class YedpViewport {
             
             this.hookNodeWidgets();
 
-            const resizeObserver = new ResizeObserver(() => this.onResize(viewportDiv));
-            resizeObserver.observe(viewportDiv);
+            this.resizeObserver = new ResizeObserver(() => this.onResize(viewportDiv));
+            this.resizeObserver.observe(viewportDiv);
 
             this.isInitialized = true;
             if (this.node.saved_scene_state) {
@@ -681,6 +699,7 @@ class YedpViewport {
             characters: this.characters.map(c => ({
                 pos: c.scene.position.toArray(), rot: c.scene.rotation.toArray(), scl: c.scene.scale.toArray(),
                 gender: c.gender, loop: c.loop, 
+                useRootMotion: c.useRootMotion, 
                 blendDuration: c.blendDuration !== undefined ? c.blendDuration : 0.5,
                 animSequence: c.animSequence.map(a => a.file), 
                 animFile: c.animSequence.length > 0 ? c.animSequence[0].file : "none", // Legacy fallback
@@ -798,6 +817,7 @@ class YedpViewport {
                     newC.scene.scale.fromArray(cData.scl);
                     newC.gender = cData.gender || 'M';
                     newC.loop = cData.loop !== false;
+                    newC.useRootMotion = cData.useRootMotion || false; 
                     newC.blendDuration = cData.blendDuration !== undefined ? cData.blendDuration : 0.5;
                     newC.showFace = cData.showFace !== false;
                     newC.faceScale = cData.faceScale !== undefined ? cData.faceScale : 1.0;
@@ -833,8 +853,6 @@ class YedpViewport {
             }
             
             if (state.mocap) {
-                // BUG FIX: Completely removed the line that was overwriting this.recordedMocaps with [] 
-                // so the files fetched from disk persist!
                 this.mocapBindings = (state.mocap.bindings || []).map(b => ({
                     id: b.id, charId: b.charId, mocapId: b.mocapId,
                     amplitude: b.amplitude !== undefined ? b.amplitude : (b.scale !== undefined ? b.scale : 1.0),
@@ -1045,6 +1063,10 @@ class YedpViewport {
                 const seq = c.animSequence.filter(a => a.action && a.duration > 0);
                 const t_eval = c.loop ? (t % c.duration) : Math.min(t, c.duration);
                 
+                let maxWeight = -1;
+                let domItem = null;
+                let domTau = 0;
+                
                 seq.forEach((item, i) => {
                     let tau = t_eval - item.startTime;
                     
@@ -1053,7 +1075,7 @@ class YedpViewport {
                         tau = tau % c.duration;
                         if (tau < 0) tau += c.duration;
                     } else {
-                        // BUG FIX: If holding on the final frame of the sequence, clamp slightly before duration end
+                        // Clamp slightly before duration end
                         if (i === seq.length - 1 && tau >= item.duration - 0.001) {
                             tau = Math.max(0, item.duration - 0.001); 
                         }
@@ -1071,6 +1093,12 @@ class YedpViewport {
                             weight = Math.min(weight, (item.duration - tau) / item.blendOut);
                         }
                         
+                        if (weight > maxWeight) {
+                            maxWeight = weight;
+                            domItem = item;
+                            domTau = tau;
+                        }
+                        
                         item.action.time = tau;
                         item.action.setEffectiveWeight(weight);
                     } else {
@@ -1079,10 +1107,51 @@ class YedpViewport {
                 });
                 
                 c.mixer.update(0); // Trigger standard engine update based on our forces
+
+                // ROOT MOTION LOGIC (Perfected: Tracks Dominant Unblended Velocity via Interpolant)
+                if (c.rootBone) {
+                    // NEW: Reset root integration if rewound to exactly 0, or if slider is dragged backward manually
+                    if (t === 0 || (t < c.lastEvalTime && !this.isPlaying)) {
+                        c.continuousPos.set(0, 0, 0);
+                        c.lastDomTau = -1; // Force a delta skip on the first frame after rewind
+                    }
+
+                    if (c.useRootMotion && domItem && domItem.rootInterpolant) {
+                        let rawPosArr = domItem.rootInterpolant.evaluate(domTau);
+                        let currentRawPos = new this.THREE.Vector3(rawPosArr[0], rawPosArr[1], rawPosArr[2]);
+                        
+                        // Detect if the timeline jumped, or the sequence clip changed, or the clip looped
+                        if (c.lastDomItem !== domItem || domTau < c.lastDomTau - 0.01 || Math.abs(domTau - c.lastDomTau) > 0.5) {
+                            c.lastRawPos.copy(currentRawPos);
+                        } else {
+                            let posDelta = currentRawPos.clone().sub(c.lastRawPos);
+                            
+                            // Only accumulate horizontal X/Z translation directly from the raw track delta.
+                            // This entirely ignores the 0.5s crossfade pulling the character backwards!
+                            c.continuousPos.x += posDelta.x;
+                            c.continuousPos.z += posDelta.z;
+                            c.lastRawPos.copy(currentRawPos);
+                        }
+                        
+                        // Overwrite the blended X/Z position with our continuous integrated position,
+                        // but retain the native Y position (bounce) from the mixer!
+                        c.rootBone.position.set(c.continuousPos.x, c.rootBone.position.y, c.continuousPos.z);
+                        
+                        c.lastDomItem = domItem;
+                        c.lastDomTau = domTau;
+                    } else {
+                        c.continuousPos.copy(c.rootBone.position);
+                        c.lastRawPos.copy(c.rootBone.position);
+                        c.lastDomItem = null;
+                        c.lastDomTau = -1;
+                    }
+                    
+                    c.lastEvalTime = t; // Update for next frame's rewind check
+                }
             }
         });
 
-        // BUG FIX: Simple single-clip environment updates using setTime to strictly freeze blendshapes.
+        // Simple single-clip environment updates using setTime to strictly freeze blendshapes.
         this.environments.forEach(e => {
             if(e.action && e.duration > 0) { 
                 let evalTime = e.loop ? (t % e.duration) : Math.max(0, Math.min(t, e.duration - 0.001));
@@ -2179,7 +2248,7 @@ class YedpViewport {
                 let animTarget = model.scene || model;
                 
                 this.cameraAnimGroup.add(animTarget);
-                this.cameraMixer = new this.THREE.AnimationMixer(animTarget);
+                this.cameraMixer = new this.AnimationMixer(animTarget);
                 this.cameraAction = this.cameraMixer.clipAction(clip);
                 this.cameraAction.play();
                 
@@ -2522,7 +2591,6 @@ class YedpViewport {
             };
             seqWrap.appendChild(btnAddSeq);
 
-            // NEW: Crossfade Control
             const blendRow = document.createElement("div");
             blendRow.style.display = "flex"; blendRow.style.alignItems = "center"; blendRow.style.gap = "4px"; blendRow.style.marginTop = "4px";
             
@@ -2578,11 +2646,11 @@ class YedpViewport {
             chkFace.onchange = (e) => { c.showFace = e.target.checked; this.updateVisibilities(); this.forceUpdateFrame(); };
             lblFace.append(chkFace, "Face");
 
-            const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px";
+            const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px"; lblLoop.style.fontSize = "10px";
             const chkLoop = document.createElement("input"); chkLoop.type = "checkbox"; chkLoop.checked = c.loop;
             chkLoop.onchange = (e) => { 
                 c.loop = e.target.checked; 
-                this.updateSequenceSchedule(c); // Recalculate duration and loops!
+                this.updateSequenceSchedule(c); 
                 const lblDur = this.container.querySelector(`#dur-${c.id}`);
                 if (lblDur) {
                     const fps = this.getWidgetValue("fps", 24);
@@ -2592,7 +2660,17 @@ class YedpViewport {
             };
             lblLoop.append(chkLoop, "Loop"); 
             
-            loopBox.append(btnGender, lblFace, lblLoop);
+            const lblRoot = document.createElement("label"); lblRoot.style.cursor = "pointer"; lblRoot.style.display = "flex"; lblRoot.style.gap = "2px"; lblRoot.style.fontSize = "10px";
+            const chkRoot = document.createElement("input"); chkRoot.type = "checkbox"; chkRoot.checked = c.useRootMotion;
+            chkRoot.onchange = (e) => { 
+                c.useRootMotion = e.target.checked; 
+                if (c.useRootMotion) c.continuousPos.set(0, 0, 0); 
+                c.lastDomTau = -1; 
+                this.forceUpdateFrame(); 
+            };
+            lblRoot.append(chkRoot, "Root M.");
+
+            loopBox.append(btnGender, lblFace, lblLoop, lblRoot);
 
             const lblDur = document.createElement("span");
             const fps = this.getWidgetValue("fps", 24);
@@ -2690,6 +2768,15 @@ class YedpViewport {
                 item.action.reset().play();
                 item.action.setEffectiveWeight(0); 
                 item.duration = cleanClip.duration;
+                
+                if (charObj.rootBone) {
+                    const rootTrack = cleanClip.tracks.find(t => t.name === `${charObj.rootBone.name}.position`);
+                    if (rootTrack) {
+                        item.rootInterpolant = rootTrack.createInterpolant(new Float32Array(3));
+                    } else {
+                        item.rootInterpolant = null;
+                    }
+                }
                 
                 this.updateSequenceSchedule(charObj);
                 
@@ -3098,7 +3185,9 @@ app.registerExtension({
                 this.onRemoved = function() {
                     if (this.vp) {
                         this.vp.isBaking = false; this.vp.isPlaying = false;
+                        if (this.vp.resizeObserver) this.vp.resizeObserver.disconnect();
                         if (this.vp.isMocapActive) {
+                            this.vp.isMocapActive = false; // Add early exit flag to kill the recursive requestAnimationFrame loop
                             if (this.vp.mocapTimer) clearInterval(this.vp.mocapTimer);
                             if (this.vp.mocapMediaStream) this.vp.mocapMediaStream.getTracks().forEach(t=>t.stop());
                             if (this.vp.mocapVideoEl) { this.vp.mocapVideoEl.pause(); this.vp.mocapVideoEl.srcObject = null; }
