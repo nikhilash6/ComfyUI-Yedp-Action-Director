@@ -16,7 +16,7 @@ if "yedp_anims" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_anims"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_anims")], {".glb", ".fbx", ".bvh"})
 
 if "yedp_envs" not in folder_paths.folder_names_and_paths:
-    folder_paths.folder_names_and_paths["yedp_envs"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_envs")], {".glb", ".gltf", ".fbx", ".obj"})
+    folder_paths.folder_names_and_paths["yedp_envs"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_envs")], {".glb", ".gltf", ".fbx", ".obj", ".ply"})
 
 # Added: Register yedp_cams folder
 if "yedp_cams" not in folder_paths.folder_names_and_paths:
@@ -31,7 +31,7 @@ YEDP_PAYLOAD_CACHE = {}
 
 class YedpActionDirector:
     """
-    ComfyUI-Yedp-Action-Director (V9.20 Edition - Environments & Alpha Mask)
+    ComfyUI-Yedp-Action-Director (V9.28 Edition - Sequencer, Mocap, & Textured Pass)
     """
     
     def __init__(self):
@@ -53,12 +53,12 @@ class YedpActionDirector:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("POSE_BATCH", "DEPTH_BATCH", "CANNY_BATCH", "NORMAL_BATCH", "SHADED_BATCH", "ALPHA_BATCH")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("POSE_BATCH", "DEPTH_BATCH", "CANNY_BATCH", "NORMAL_BATCH", "SHADED_BATCH", "ALPHA_BATCH", "TEXTURED_BATCH")
     FUNCTION = "render"
     CATEGORY = "Yedp/MoCap"
     
-    DESCRIPTION = "Controls multiple 3D characters, environment props (GLTF/FBX), and camera keyframes."
+    DESCRIPTION = "Controls multiple 3D characters, environment props (GLTF/FBX/PLY), and camera keyframes."
 
     @classmethod
     def IS_CHANGED(cls, width, height, frame_count, fps, client_data=None, unique_id=None):
@@ -97,7 +97,7 @@ class YedpActionDirector:
             print("[Yedp] ERROR: No image data received from frontend.")
             red_frame = torch.zeros((1, height, width, 3))
             red_frame[:,:,:,0] = 1.0 
-            return (red_frame, red_frame, red_frame, red_frame, red_frame, red_frame)
+            return (red_frame, red_frame, red_frame, red_frame, red_frame, red_frame, red_frame)
 
         # 2. Check if it's a Memory Cache ID instead of raw JSON
         global YEDP_PAYLOAD_CACHE
@@ -108,7 +108,7 @@ class YedpActionDirector:
                 print(f"[Yedp] ERROR: Payload ID {client_data} not found in memory cache! Please click BAKE in the node again.")
                 red_frame = torch.zeros((1, height, width, 3))
                 red_frame[:,:,:,0] = 1.0 
-                return (red_frame, red_frame, red_frame, red_frame, red_frame, red_frame)
+                return (red_frame, red_frame, red_frame, red_frame, red_frame, red_frame, red_frame)
 
         # 3. Parse JSON
         try:
@@ -124,9 +124,10 @@ class YedpActionDirector:
         normal_batch = self.decode_batch(data.get("normal", []), width, height, "normal")
         shaded_batch = self.decode_batch(data.get("shaded", []), width, height, "shaded")
         alpha_batch = self.decode_batch(data.get("alpha", []), width, height, "alpha")
+        textured_batch = self.decode_batch(data.get("textured", []), width, height, "textured")
         
-        print(f"[Yedp] Successfully rendered {len(pose_batch)} frames (6 batches).")
-        return (pose_batch, depth_batch, canny_batch, normal_batch, shaded_batch, alpha_batch)
+        print(f"[Yedp] Successfully rendered {len(pose_batch)} frames (7 batches).")
+        return (pose_batch, depth_batch, canny_batch, normal_batch, shaded_batch, alpha_batch, textured_batch)
 
 # --- API ROUTES ---
 @PromptServer.instance.routes.get("/yedp/get_animations")
@@ -203,3 +204,17 @@ async def upload_payload(request):
         del YEDP_PAYLOAD_CACHE[oldest_key]
         
     return web.json_response({"payload_id": payload_id})
+
+# Added: API Route for scanning the node's /web/ directory for extra rigs
+@PromptServer.instance.routes.get("/yedp/get_rigs")
+async def get_rigs(request):
+    web_dir = os.path.join(os.path.dirname(__file__), "web")
+    if not os.path.exists(web_dir):
+        return web.json_response({"files": ["Yedp_Rig.glb"]})
+    
+    # Look for any .glb, .gltf, or .fbx files placed manually by the user
+    files = [f for f in os.listdir(web_dir) if f.lower().endswith(('.glb', '.gltf', '.fbx'))]
+    if "Yedp_Rig.glb" not in files:
+        files.insert(0, "Yedp_Rig.glb")
+        
+    return web.json_response({"files": files})
