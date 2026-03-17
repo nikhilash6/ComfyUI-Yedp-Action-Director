@@ -13,6 +13,7 @@ import { api } from "/scripts/api.js";
  * - Update: Proportional Auto-Scaling measures the 3D rig's ear-to-ear distance to scale mocap perfectly to any character.
  * - Feature: Added JSON disk-saving and loading for recorded Mocap tracks!
  * - Feature: Continuous Root Motion Tracking! Automatically strips loop snapping and integrates spatial movement indefinitely. 
+ * - Feature: Added PLYLoader support for Gaussian Splats / Point Clouds and a new TEXTURED Render pass!
  */
 
 const loadThreeJS = async () => {
@@ -40,9 +41,10 @@ const loadThreeJS = async () => {
             await import(new URL("./fflate.module.js", baseUrl).href); 
             const { FBXLoader } = await import(new URL("./FBXLoader.js", baseUrl).href);
             const { BVHLoader } = await import(new URL("./BVHLoader.js", baseUrl).href);
+            const { PLYLoader } = await import(new URL("./PLYLoader.js", baseUrl).href);
             const { clone } = await import(new URL("./SkeletonUtils.js", baseUrl).href);
 
-            resolve({ THREE, OrbitControls, TransformControls, GLTFLoader, FBXLoader, BVHLoader, SkeletonUtils: { clone } });
+            resolve({ THREE, OrbitControls, TransformControls, GLTFLoader, FBXLoader, BVHLoader, PLYLoader, SkeletonUtils: { clone } });
         } catch (e) {
             console.error("[Yedp] Critical Engine Load Failure:", e);
             reject(e);
@@ -208,7 +210,7 @@ class CharacterInstance {
                 }
             }
 
-            if(child.isMesh || child.isSkinnedMesh) {
+            if(child.isMesh || child.isSkinnedMesh || child.isPoints || child.type === 'Points') {
                 child.visible = true; 
                 child.frustumCulled = false; 
                 child.castShadow = true;
@@ -325,6 +327,7 @@ class YedpViewport {
         this.clock = null;
         
         this.baseRig = null;
+        this.rigCaches = new Map();
         
         this.characters = []; 
         this.charCounter = 0;
@@ -376,6 +379,7 @@ class YedpViewport {
         
         this.isShadedMode = false;
         this.isDepthMode = false;
+        this.isTexturedMode = false;
         this.userNear = 0.1;
         this.userFar = 10.0;
         this.defaultNear = 0.1;
@@ -390,6 +394,7 @@ class YedpViewport {
         this.availableAnimations = ["none"];
         this.availableEnvs = ["none"];
         this.availableCams = ["none"];
+        this.availableRigs = ["Yedp_Rig.glb"];
 
         this.uiSidebar = null;
         this.uiCharList = null;
@@ -419,15 +424,88 @@ class YedpViewport {
             this.GLTFLoaderClass = libs.GLTFLoader;
             this.FBXLoader = libs.FBXLoader; 
             this.BVHLoader = libs.BVHLoader;
+            this.PLYLoader = libs.PLYLoader;
             window._YEDP_SKEL_UTILS = libs.SkeletonUtils;
 
-            const createMats = () => ({
-                shaded: new this.THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.6, metalness: 0.1 }),
-                depth: new this.THREE.MeshDepthMaterial({ depthPacking: this.THREE.BasicDepthPacking }),
-                canny: new this.THREE.MeshMatcapMaterial({ matcap: this.createRimTexture() }),
-                normal: new this.THREE.MeshNormalMaterial(),
-                alpha: new this.THREE.MeshBasicMaterial({ color: 0xffffff })
-            });
+            const createMats = () => {
+                const m = {
+                    shaded: new this.THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.6, metalness: 0.1 }),
+                    depth: new this.THREE.MeshDepthMaterial({ depthPacking: this.THREE.BasicDepthPacking }),
+                    canny: new this.THREE.MeshMatcapMaterial({ matcap: this.createRimTexture() }),
+                    normal: new this.THREE.MeshNormalMaterial(),
+                    alpha: new this.THREE.MeshBasicMaterial({ color: 0xffffff })
+                };
+                
+                const pointVert = `
+                    void main() {
+                        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                        gl_Position = projectionMatrix * mvPosition;
+                        if (projectionMatrix[3][3] > 0.5) {
+                            gl_PointSize = 30.0; // Large sizes cast better, solid shadow maps without holes
+                        } else {
+                            gl_PointSize = 25.0 / -mvPosition.z;
+                        }
+                    }
+                `;
+                
+                m.depthPoints = new this.THREE.ShaderMaterial({
+                    vertexShader: pointVert,
+                    fragmentShader: `
+                        void main() {
+                            vec2 xy = gl_PointCoord.xy - vec2(0.5);
+                            if(length(xy) > 0.5) discard;
+                            gl_FragColor = vec4(vec3(1.0 - gl_FragCoord.z), 1.0); // Inverted to match BasicDepthPacking (near=white, far=black)
+                        }
+                    `
+                });
+
+                m.normalPoints = new this.THREE.ShaderMaterial({
+                    vertexShader: pointVert,
+                    fragmentShader: `
+                        void main() {
+                            vec2 xy = gl_PointCoord.xy - vec2(0.5);
+                            float ll = length(xy);
+                            if(ll > 0.5) discard;
+                            vec3 normal = normalize(vec3(xy.x * 2.0, -xy.y * 2.0, sqrt(max(0.0, 1.0 - (xy.x*2.0)*(xy.x*2.0) - (xy.y*2.0)*(xy.y*2.0)))));
+                            gl_FragColor = vec4((normal + 1.0) * 0.5, 1.0);
+                        }
+                    `
+                });
+
+                // MeshDepthMaterial is necessary so the Three.js shadow renderer perfectly respects light packing definitions
+                m.depthPointsShadow = new this.THREE.MeshDepthMaterial({ depthPacking: this.THREE.RGBADepthPacking });
+                m.depthPointsShadow.onBeforeCompile = (shader) => {
+                    shader.vertexShader = shader.vertexShader.replace(
+                        '#include <project_vertex>',
+                        `#include <project_vertex>
+                        if (projectionMatrix[3][3] > 0.5) { gl_PointSize = 30.0; } else { gl_PointSize = 25.0 / -mvPosition.z; }`
+                    );
+                    shader.fragmentShader = shader.fragmentShader.replace(
+                        'void main() {',
+                        `void main() {
+                            vec2 xy = gl_PointCoord.xy - vec2(0.5);
+                            if(length(xy) > 0.5) discard;`
+                    );
+                };
+
+                // MeshDistanceMaterial handles shadows for PointLights natively
+                m.distancePointsShadow = new this.THREE.MeshDistanceMaterial();
+                m.distancePointsShadow.onBeforeCompile = (shader) => {
+                    shader.vertexShader = shader.vertexShader.replace(
+                        '#include <project_vertex>',
+                        `#include <project_vertex>
+                        if (projectionMatrix[3][3] > 0.5) { gl_PointSize = 30.0; } else { gl_PointSize = 25.0 / -mvPosition.z; }`
+                    );
+                    shader.fragmentShader = shader.fragmentShader.replace(
+                        'void main() {',
+                        `void main() {
+                            vec2 xy = gl_PointCoord.xy - vec2(0.5);
+                            if(length(xy) > 0.5) discard;`
+                    );
+                };
+
+                return m;
+            };
             this.matsSkinned = createMats();
             this.matsStatic = createMats();
 
@@ -595,7 +673,7 @@ class YedpViewport {
                 this.environments.forEach(env => {
                     if (env.group.visible) {
                         interactables.push(env.group);
-                        env.group.traverse(child => { if(child.isMesh || child.isSkinnedMesh) objMap.set(child, { obj: env, type: 'environment', id: env.id }); });
+                        env.group.traverse(child => { if(child.isMesh || child.isSkinnedMesh || child.isPoints) objMap.set(child, { obj: env, type: 'environment', id: env.id }); });
                     }
                 });
                 
@@ -621,6 +699,7 @@ class YedpViewport {
             await this.fetchEnvs();
             await this.fetchCams(); 
             await this.fetchMocaps(); 
+            await this.fetchRigs();
 
             this.setupHeader(headerDiv);
             this.setupTimeline(timelineDiv);
@@ -634,7 +713,10 @@ class YedpViewport {
             dl.position.set(2, 4, 3);
             dl.lookAt(0, 0, 0); 
             
-            await this.loadBaseRig();
+            await this.loadRig("Yedp_Rig.glb");
+            if (!this.node.saved_scene_state) {
+                await this.addCharacter("Yedp_Rig.glb");
+            }
             
             this.hookNodeWidgets();
 
@@ -703,7 +785,8 @@ class YedpViewport {
                 blendDuration: c.blendDuration !== undefined ? c.blendDuration : 0.5,
                 animSequence: c.animSequence.map(a => a.file), 
                 animFile: c.animSequence.length > 0 ? c.animSequence[0].file : "none", // Legacy fallback
-                showFace: c.showFace, faceScale: c.faceScale
+                showFace: c.showFace, faceScale: c.faceScale,
+                rigFile: c.rigFile
             })),
             environments: this.environments.map(e => ({
                 pos: e.group.position.toArray(), rot: e.group.rotation.toArray(), scl: e.group.scale.toArray(),
@@ -716,6 +799,7 @@ class YedpViewport {
             settings: {
                 isShadedMode: this.isShadedMode,
                 isDepthMode: this.isDepthMode,
+                isTexturedMode: this.isTexturedMode,
                 userNear: this.userNear,
                 userFar: this.userFar,
                 customCamAnim: this.container.querySelector("#sel-cam-anim")?.value || "none"
@@ -736,9 +820,11 @@ class YedpViewport {
             if (state.settings) {
                 this.isShadedMode = state.settings.isShadedMode || false;
                 this.isDepthMode = state.settings.isDepthMode || false;
+                this.isTexturedMode = state.settings.isTexturedMode || false;
                 this.userNear = state.settings.userNear || 0.1;
                 this.userFar = state.settings.userFar || 10.0;
                 
+                const chkT = this.container.querySelector("#chk-textured"); if(chkT) chkT.checked = this.isTexturedMode;
                 const chkS = this.container.querySelector("#chk-shaded"); if(chkS) chkS.checked = this.isShadedMode;
                 const chkD = this.container.querySelector("#chk-depth"); if(chkD) chkD.checked = this.isDepthMode;
                 const inpN = this.container.querySelector("#inp-near"); if(inpN) inpN.value = this.userNear;
@@ -810,8 +896,10 @@ class YedpViewport {
             // Restore Characters & their Sequence!
             if (state.characters) {
                 for (const cData of state.characters) {
-                    this.addCharacter();
+                    await this.addCharacter(cData.rigFile || "Yedp_Rig.glb");
                     const newC = this.characters[this.characters.length - 1];
+                    if (!newC) continue;
+                    
                     newC.scene.position.fromArray(cData.pos);
                     newC.scene.rotation.fromArray(cData.rot);
                     newC.scene.scale.fromArray(cData.scl);
@@ -897,6 +985,8 @@ class YedpViewport {
     setupHeader(div) {
         div.innerHTML = `
             <div style="display:flex; align-items:center; gap:8px;">
+                <label style="color:#ccc; font-size:11px; cursor:pointer;"><input type="checkbox" id="chk-textured"> Textured</label>
+                <div style="width:1px; height:16px; background:#444;"></div>
                 <label style="color:#ccc; font-size:11px; cursor:pointer;"><input type="checkbox" id="chk-shaded"> Shaded</label>
                 <div style="width:1px; height:16px; background:#444;"></div>
                 <label style="color:#ccc; font-size:11px; cursor:pointer;"><input type="checkbox" id="chk-depth"> Depth</label>
@@ -917,13 +1007,25 @@ class YedpViewport {
             </div>
         `;
 
+        const chkTextured = div.querySelector("#chk-textured");
         const chkShaded = div.querySelector("#chk-shaded");
         const chkDepth = div.querySelector("#chk-depth");
 
+        chkTextured.onchange = (e) => {
+            if (e.target.checked) {
+                chkShaded.checked = false; chkDepth.checked = false;
+                this.isShadedMode = false; this.isDepthMode = false;
+                div.querySelector("#depth-ctrls").style.opacity = "0.5";
+            }
+            this.isTexturedMode = e.target.checked;
+            this.updateVisibilities();
+            this.forceUpdateFrame();
+        }
+
         chkShaded.onchange = (e) => { 
-            if (e.target.checked && chkDepth.checked) {
-                chkDepth.checked = false;
-                this.isDepthMode = false;
+            if (e.target.checked) {
+                chkTextured.checked = false; chkDepth.checked = false;
+                this.isTexturedMode = false; this.isDepthMode = false;
                 div.querySelector("#depth-ctrls").style.opacity = "0.5";
             }
             this.isShadedMode = e.target.checked; 
@@ -932,9 +1034,9 @@ class YedpViewport {
         };
         
         chkDepth.onchange = (e) => {
-            if (e.target.checked && chkShaded.checked) {
-                chkShaded.checked = false;
-                this.isShadedMode = false;
+            if (e.target.checked) {
+                chkTextured.checked = false; chkShaded.checked = false;
+                this.isTexturedMode = false; this.isShadedMode = false;
             }
             this.isDepthMode = e.target.checked;
             div.querySelector("#depth-ctrls").style.opacity = this.isDepthMode ? "1.0" : "0.5";
@@ -963,6 +1065,7 @@ class YedpViewport {
             await this.fetchEnvs();
             await this.fetchCams();
             await this.fetchMocaps();
+            await this.fetchRigs();
             
             this.renderCharacterCards();
             this.renderEnvironmentCards();
@@ -974,6 +1077,7 @@ class YedpViewport {
                 this.availableCams.forEach(anim => selCam.add(new Option(anim, anim)));
                 selCam.value = this.availableCams.includes(currentVal) ? currentVal : "none";
             }
+            
             btn.innerText = "↻ SYNC FOLDERS";
         };
 
@@ -1532,10 +1636,17 @@ class YedpViewport {
 
         // CHARACTERS
         const charCol = createCollapsible(`${iconChars} Characters`, true);
+
+        const charHeadControls = document.createElement("div");
+        charHeadControls.style.display = "flex"; charHeadControls.style.gap = "4px";
+
         const btnAddChar = createBtn("+ Add Char", "#252", "#373");
         btnAddChar.style.flex = "none"; btnAddChar.style.padding = "2px 6px"; btnAddChar.style.fontSize = "9px";
-        btnAddChar.onclick = (e) => { e.stopPropagation(); this.addCharacter(); };
-        charCol.head.appendChild(btnAddChar);
+        btnAddChar.onclick = async (e) => { e.stopPropagation(); await this.addCharacter("Yedp_Rig.glb"); };
+
+        charHeadControls.append(btnAddChar);
+        charCol.head.appendChild(charHeadControls);
+
         this.uiCharList = document.createElement("div");
         this.uiCharList.style.display = "flex"; this.uiCharList.style.flexDirection = "column"; this.uiCharList.style.gap = "6px";
         charCol.content.appendChild(this.uiCharList);
@@ -1843,6 +1954,18 @@ class YedpViewport {
     }
 
     // --- LOGIC: DATA FETCHING & SAVING MOCAP ---
+    async fetchRigs() {
+        try {
+            const res = await api.fetchApi("/yedp/get_rigs");
+            const data = await res.json();
+            if (data.files && data.files.length > 0) this.availableRigs = data.files;
+            else this.availableRigs = ["Yedp_Rig.glb"];
+        } catch(e) { 
+            console.error("Failed to fetch rigs."); 
+            this.availableRigs = ["Yedp_Rig.glb"]; 
+        }
+    }
+
     async fetchMocaps() {
         try {
             const res = await api.fetchApi("/yedp/get_mocaps");
@@ -2199,22 +2322,33 @@ class YedpViewport {
         } catch(e) { console.error("Failed to fetch cams."); }
     }
 
-    async loadBaseRig() {
-        const loader = new this.GLTFLoaderClass();
-        const rigUrl = new URL(`../Yedp_Rig.glb?t=${Date.now()}`, this.baseUrl).href;
-        console.log("[Yedp] Loading Base Rig from:", rigUrl);
-        const gltf = await loader.loadAsync(rigUrl);
-        this.baseRig = gltf.scene;
+    async loadRig(filename) {
+        if (this.rigCaches.has(filename)) return this.rigCaches.get(filename);
         
-        this.baseRig.traverse((child) => {
-            if(child.isBone || child.type === "Bone" || child.isObject3D) {
-                const normalized = semanticNormalize(child.name);
-                if (normalized) this.semanticMap.set(normalized, child.name);
+        const isFBX = filename.toLowerCase().endsWith(".fbx");
+        const loader = isFBX ? new this.FBXLoader() : new this.GLTFLoaderClass();
+        const rigUrl = new URL(`../${filename}?t=${Date.now()}`, this.baseUrl).href;
+        
+        try {
+            console.log("[Yedp] Loading Rig from:", rigUrl);
+            const model = await loader.loadAsync(rigUrl);
+            const rig = isFBX ? model : model.scene;
+            
+            rig.traverse((child) => {
+                if(child.isBone || child.type === "Bone" || child.isObject3D) {
+                    const normalized = semanticNormalize(child.name);
+                    if (normalized) this.semanticMap.set(normalized, child.name);
+                }
+            });
+            
+            this.rigCaches.set(filename, rig);
+            return rig;
+        } catch(e) {
+            console.error("[Yedp] Failed to load rig", filename, e);
+            if(filename !== "Yedp_Rig.glb") {
+                return await this.loadRig("Yedp_Rig.glb"); // Fallback
             }
-        });
-        
-        if (!this.node.saved_scene_state) {
-            this.addCharacter();
+            throw e;
         }
     }
 
@@ -2402,21 +2536,45 @@ class YedpViewport {
         }
         envObj.envFile = filename;
         const isFBX = filename.toLowerCase().endsWith(".fbx");
+        const isPLY = filename.toLowerCase().endsWith(".ply");
         const url = `/view?filename=${filename}&type=input&subfolder=yedp_envs&t=${Date.now()}`;
         try {
-            const model = isFBX ? await new this.FBXLoader().loadAsync(url) : await new this.GLTFLoaderClass().loadAsync(url);
+            let targetObj;
+            let model;
+
+            if (isFBX) {
+                model = await new this.FBXLoader().loadAsync(url);
+                targetObj = model;
+            } else if (isPLY) {
+                const geometry = await new this.PLYLoader().loadAsync(url);
+                geometry.computeVertexNormals();
+                // Gaussian Splat point clouds export with vertex colors
+                if (geometry.attributes.color) {
+                    const mat = new this.THREE.PointsMaterial({ size: 0.05, vertexColors: true });
+                    targetObj = new this.THREE.Points(geometry, mat);
+                } else {
+                    const mat = new this.THREE.MeshStandardMaterial({ color: 0xcccccc });
+                    targetObj = new this.THREE.Mesh(geometry, mat);
+                }
+                model = targetObj; 
+            } else {
+                model = await new this.GLTFLoaderClass().loadAsync(url);
+                targetObj = model.scene;
+            }
             
             envObj.group.clear();
             envObj.meshes = [];
-            
-            let targetObj = isFBX ? model : model.scene;
             envObj.group.add(targetObj);
             
             targetObj.traverse((child) => {
                 child.visible = true; 
-                if(child.isMesh || child.isSkinnedMesh || child.type === 'Mesh' || child.type === 'SkinnedMesh') {
+                if(child.isMesh || child.isSkinnedMesh || child.isPoints || child.type === 'Mesh' || child.type === 'SkinnedMesh' || child.type === 'Points') {
                     child.castShadow = true;
                     child.receiveShadow = true;
+                    if (child.isPoints || child.type === 'Points') {
+                        child.customDepthMaterial = this.matsStatic.depthPointsShadow;
+                        child.customDistanceMaterial = this.matsStatic.distancePointsShadow;
+                    }
                     child.frustumCulled = false; 
                     
                     if (child.material) {
@@ -2438,11 +2596,10 @@ class YedpViewport {
             
             if(info) info.innerText = `[Meshes: ${envObj.meshes.length}]`;
 
-            let clip = isFBX ? model.animations?.[0] : (model.animations?.[0] || model.scene?.animations?.[0] || model.asset?.animations?.[0]);
+            let clip = isFBX ? model.animations?.[0] : (!isPLY ? (model.animations?.[0] || model.scene?.animations?.[0] || model.asset?.animations?.[0]) : null);
             if(clip) {
                 envObj.mixer = new this.THREE.AnimationMixer(targetObj);
                 envObj.action = envObj.mixer.clipAction(clip);
-                // BUG FIX: ALWAYS force LoopRepeat. We handle clamping manually in evaluateAnimations to preserve blendshapes.
                 envObj.action.setLoop(this.THREE.LoopRepeat);
                 envObj.action.reset().setEffectiveWeight(1).play();
                 envObj.duration = clip.duration;
@@ -2540,11 +2697,24 @@ class YedpViewport {
             head.appendChild(btnDel);
             
             const meshInfo = document.createElement("div");
+            meshInfo.id = `char-mesh-info-${c.id}`;
             meshInfo.style.fontSize = "9px";
             meshInfo.style.color = "#888";
             meshInfo.style.marginBottom = "4px";
             meshInfo.innerText = `[M:${c.depthMeshesM.length} | F:${c.depthMeshesF.length} | Pose:${c.poseMeshes.length}]`;
             
+            // RIG SWAP UI
+            const selRigRow = document.createElement("div");
+            selRigRow.style.display = "flex"; selRigRow.style.alignItems = "center"; selRigRow.style.gap = "4px"; selRigRow.style.marginBottom = "4px";
+            const rigLbl = document.createElement("span");
+            rigLbl.innerText = "Model:"; rigLbl.style.fontSize = "9px"; rigLbl.style.color = "#888"; rigLbl.style.width = "35px";
+            const selRig = document.createElement("select");
+            Object.assign(selRig.style, { flex: "1", width: "0", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px" });
+            this.availableRigs.forEach(r => selRig.add(new Option(r, r)));
+            selRig.value = c.rigFile;
+            selRig.onchange = (e) => { e.stopPropagation(); this.swapCharacterRig(c.id, e.target.value); };
+            selRigRow.append(rigLbl, selRig);
+
             // MULTI-CLIP SEQUENCER UI
             const seqWrap = document.createElement("div");
             Object.assign(seqWrap.style, { display: "flex", flexDirection: "column", gap: "4px", marginBottom: "4px", background: "#1a1a1a", padding: "4px", borderRadius: "3px", border: "1px solid #333" });
@@ -2681,25 +2851,171 @@ class YedpViewport {
             lblDur.id = `dur-${c.id}`; lblDur.style.color = "#888"; lblDur.style.fontFamily = "monospace";
             
             foot.append(loopBox, lblDur); 
-            card.append(head, meshInfo, seqWrap, faceScaleRow, foot); 
+            card.append(head, meshInfo, selRigRow, seqWrap, faceScaleRow, foot); 
             this.uiCharList.appendChild(card);
         });
         this.refreshSidebarHighlights();
         this.renderMocapBindings(); 
     }
 
-    addCharacter() {
+    async addCharacter(rigFilename = "Yedp_Rig.glb") {
         if (this.characters.length >= 16) { alert("Maximum 16 characters recommended for WebGL performance."); return; }
+        
+        let rig;
+        try {
+            rig = await this.loadRig(rigFilename);
+        } catch (e) {
+            console.error("Failed to load rig:", rigFilename);
+            return;
+        }
+
         this.charCounter++;
-        const newChar = new CharacterInstance(this.charCounter, this.baseRig, this.THREE);
+        const newChar = new CharacterInstance(this.charCounter, rig, this.THREE);
+        newChar.rigFile = rigFilename; // keep track of selected rig to save state
         newChar.addSequenceItem("none"); // Default first empty slot
-        this.scene.add(newChar.scene); this.scene.add(newChar.skeletonHelper);
+        
+        newChar.scene.traverse((child) => {
+            if (child.isPoints || child.type === 'Points') {
+                child.customDepthMaterial = this.matsStatic.depthPointsShadow;
+                child.customDistanceMaterial = this.matsStatic.distancePointsShadow;
+            }
+        });
+
+        this.scene.add(newChar.scene); 
+        this.scene.add(newChar.skeletonHelper);
         this.characters.push(newChar);
 
         newChar.depthMeshesM.forEach(m => { if(m.isMesh && !this.originalMaterials.has(m)) this.originalMaterials.set(m, m.material); });
         newChar.depthMeshesF.forEach(m => { if(m.isMesh && !this.originalMaterials.has(m)) this.originalMaterials.set(m, m.material); });
 
-        this.updateVisibilities(); this.renderCharacterCards();
+        this.updateVisibilities(); 
+        this.renderCharacterCards();
+    }
+
+    async swapCharacterRig(charId, newRigFilename) {
+        const c = this.characters.find(c => c.id === charId);
+        if (!c) return;
+
+        const infoLbl = this.container.querySelector(`#char-mesh-info-${c.id}`);
+        if(infoLbl) infoLbl.innerText = "[Loading Rig...]";
+
+        try {
+            const newBaseRig = await this.loadRig(newRigFilename);
+            const newScene = window._YEDP_SKEL_UTILS.clone(newBaseRig);
+
+            // Copy transform state
+            newScene.position.copy(c.scene.position);
+            newScene.rotation.copy(c.scene.rotation);
+            newScene.scale.copy(c.scene.scale);
+
+            // Clean up old scene
+            this.scene.remove(c.scene);
+            this.scene.remove(c.skeletonHelper);
+            c.mixer.stopAllAction();
+
+            // Swap scene reference and reinitialize core arrays
+            c.scene = newScene;
+            c.mixer = new this.THREE.AnimationMixer(c.scene);
+            c.rootBone = null;
+            c.poseMeshes = [];
+            c.poseFaceMeshes = [];
+            c.depthMeshesM = [];
+            c.depthMeshesF = [];
+            c.hasFemaleMesh = false;
+            c.opFaceBones = new Array(70).fill(null);
+            c.opFaceBonesRest = new Array(70).fill(null);
+            c.rigFile = newRigFilename;
+
+            c.skeletonHelper = new this.THREE.SkeletonHelper(c.scene);
+            c.skeletonHelper.visible = this.container.querySelector("#chk-skel")?.checked || false;
+
+            c.scene.traverse((child) => {
+                if (child.isBone && !c.rootBone && child.parent && child.parent.type !== 'Bone') {
+                    c.rootBone = child;
+                }
+                if (child.isBone && child.name.includes("OP_Face_")) {
+                    const match = child.name.match(/OP_Face_(\d+)/);
+                    if (match) {
+                        const idx = parseInt(match[1]);
+                        if (idx >= 0 && idx < 70) {
+                            c.opFaceBones[idx] = child;
+                            c.opFaceBonesRest[idx] = child.position.clone();
+                            child.scale.setScalar(c.faceScale); 
+                        }
+                    }
+                }
+                if(child.isMesh || child.isSkinnedMesh || child.isPoints || child.type === 'Points') {
+                    child.visible = true;
+                    child.frustumCulled = false;
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                    if (child.isPoints || child.type === 'Points') {
+                        child.customDepthMaterial = this.matsStatic.depthPointsShadow;
+                        child.customDistanceMaterial = this.matsStatic.distancePointsShadow;
+                    }
+
+                    let fullPath = "";
+                    let curr = child;
+                    while (curr && curr !== c.scene && curr !== null) {
+                        if (curr.name) fullPath += curr.name.toLowerCase() + "|";
+                        curr = curr.parent;
+                    }
+
+                    const n = fullPath.replace(/[\s_]/g, '');
+                    if (n.includes("openpose") || n.includes("pose")) {
+                        c.poseMeshes.push(child);
+                        if (n.includes("face")) c.poseFaceMeshes.push(child);
+                        if (child.material) {
+                            const processMat = (mat) => {
+                                const oldColor = mat.color || new this.THREE.Color(0xffffff);
+                                const newMat = new this.THREE.MeshBasicMaterial({ color: oldColor });
+                                if (mat.map) { newMat.map = mat.map; newMat.color.setHex(0xffffff); }
+                                return newMat;
+                            };
+                            if (Array.isArray(child.material)) child.material = child.material.map(processMat);
+                            else child.material = processMat(child.material);
+                        }
+                    } else if (n.includes("depthf") || n.includes("female") || n.includes("woman") || n.includes("|f|") || n.endsWith("f|")) {
+                        c.hasFemaleMesh = true;
+                        c.depthMeshesF.push(child);
+                        child.visible = false;
+                    } else if (n.includes("depth") || n.includes("male") || n.includes("man")) {
+                        c.depthMeshesM.push(child);
+                        child.visible = false;
+                    } else {
+                        c.depthMeshesM.push(child);
+                        c.depthMeshesF.push(child);
+                        child.visible = false;
+                    }
+                }
+            });
+
+            // Cache new materials
+            c.depthMeshesM.forEach(m => { if(m.isMesh && !this.originalMaterials.has(m)) this.originalMaterials.set(m, m.material); });
+            c.depthMeshesF.forEach(m => { if(m.isMesh && !this.originalMaterials.has(m)) this.originalMaterials.set(m, m.material); });
+
+            this.scene.add(c.scene);
+            this.scene.add(c.skeletonHelper);
+
+            // Rebind sequential animations to the new mixer
+            for (const item of c.animSequence) {
+                if (item.file !== "none") {
+                    await this.loadSequenceAnim(c, item, item.file);
+                }
+            }
+
+            if (this.selected.type === 'character' && this.selected.id === c.id) {
+                this.transformControls.attach(c.scene);
+            }
+
+            this.updateVisibilities();
+            this.renderCharacterCards();
+            this.forceUpdateFrame();
+
+        } catch (e) {
+            console.error("Rig swap failed:", e);
+            if(infoLbl) infoLbl.innerHTML = `<span style="color:red;">Load Error</span>`;
+        }
     }
 
     removeCharacter(id) {
@@ -2753,7 +3069,7 @@ class YedpViewport {
                     const prop = t.name.substring(lastDot + 1);
                     const fullBonePath = t.name.substring(0, lastDot);
                     
-                    if (fullBonePath.includes("OP_Face_") || fullBonePath.toLowerCase().includes("op_face")) return;
+                    //if (fullBonePath.includes("OP_Face_") || fullBonePath.toLowerCase().includes("op_face")) return;
                     
                     const normalizedTrackBone = semanticNormalize(fullBonePath);
                     if (prop === "scale") return; 
@@ -2889,15 +3205,21 @@ class YedpViewport {
     updateVisibilities() {
         const isDepth = this.isDepthMode;
         const isShaded = this.isShadedMode;
+        const isTextured = this.isTexturedMode;
+
+        const getMat = (m) => {
+            if (isDepth) return m.isPoints ? this.matsStatic.depthPoints : (m.isSkinnedMesh ? this.matsSkinned.depth : this.matsStatic.depth);
+            if (isShaded) return m.isPoints ? (this.originalMaterials.get(m) || m.material) : (m.isSkinnedMesh ? this.matsSkinned.shaded : this.matsStatic.shaded);
+            return this.originalMaterials.get(m) || m.material;
+        };
 
         this.characters.forEach(c => {
             c.inactiveDepthMeshes.forEach(m => m.visible = false);
-            const showDepthMeshes = isDepth || isShaded;
+            const showDepthMeshes = isDepth || isShaded || isTextured;
+            
             c.activeDepthMeshes.forEach(m => {
                 m.visible = showDepthMeshes;
-                if (isDepth) m.material = m.isSkinnedMesh ? this.matsSkinned.depth : this.matsStatic.depth;
-                else if (isShaded) m.material = m.isSkinnedMesh ? this.matsSkinned.shaded : this.matsStatic.shaded;
-                else m.material = this.originalMaterials.get(m) || m.material;
+                m.material = getMat(m);
             });
             c.poseMeshes.forEach(m => {
                 const isFace = c.poseFaceMeshes.includes(m);
@@ -2908,9 +3230,7 @@ class YedpViewport {
         this.environments.forEach(e => {
             e.meshes.forEach(m => {
                 m.visible = true; 
-                if (isDepth) m.material = m.isSkinnedMesh ? this.matsSkinned.depth : this.matsStatic.depth;
-                else if (isShaded) m.material = m.isSkinnedMesh ? this.matsSkinned.shaded : this.matsStatic.shaded;
-                else m.material = this.originalMaterials.get(m) || m.material;
+                m.material = getMat(m);
             });
         });
 
@@ -3018,7 +3338,7 @@ class YedpViewport {
         const framesToRender = isSingleFrame ? 1 : totalNodeFrames;
         const currentUIFrame = parseInt(this.container.querySelector("#t-slider").value) || 0;
         
-        const results = { pose: [], depth: [], canny: [], normal: [], shaded: [], alpha: [] };
+        const results = { pose: [], depth: [], canny: [], normal: [], shaded: [], alpha: [], textured: [] };
 
         const visSkel = this.container.querySelector("#chk-skel").checked;
         const toggleHelpers = (vis) => { 
@@ -3031,8 +3351,8 @@ class YedpViewport {
 
         const setVisibility = (mode) => {
             const showPose = mode === 'pose';
-            const showDepth = ['depth', 'canny', 'normal', 'shaded', 'alpha'].includes(mode);
-            const showEnv = ['depth', 'normal', 'shaded'].includes(mode);
+            const showDepth = ['depth', 'canny', 'normal', 'shaded', 'alpha', 'textured'].includes(mode);
+            const showEnv = ['depth', 'normal', 'shaded', 'textured'].includes(mode);
 
             this.characters.forEach(c => {
                 c.poseMeshes.forEach(m => {
@@ -3063,15 +3383,24 @@ class YedpViewport {
 
         const executeMaterialPass = (matKey, arrayObj) => {
             const restores = [];
-            this.characters.forEach(c => c.activeDepthMeshes.forEach(m => { 
-                restores.push({mesh: m, mat: m.material}); 
-                m.material = m.isSkinnedMesh ? this.matsSkinned[matKey] : this.matsStatic[matKey]; 
-            }));
-            this.environments.forEach(e => e.meshes.forEach(m => { 
-                restores.push({mesh: m, mat: m.material}); 
-                m.material = m.isSkinnedMesh ? this.matsSkinned[matKey] : this.matsStatic[matKey]; 
-            }));
+            const applyMat = (m) => {
+                restores.push({mesh: m, mat: m.material});
+                if (matKey === 'textured') {
+                    m.material = this.originalMaterials.get(m) || m.material; 
+                } else if (m.isPoints) {
+                    if (matKey === 'depth') m.material = this.matsStatic.depthPoints;
+                    else if (matKey === 'normal') m.material = this.matsStatic.normalPoints;
+                    else m.material = this.originalMaterials.get(m) || m.material; 
+                } else {
+                    m.material = m.isSkinnedMesh ? this.matsSkinned[matKey] : this.matsStatic[matKey];
+                }
+            };
+
+            this.characters.forEach(c => c.activeDepthMeshes.forEach(applyMat));
+            this.environments.forEach(e => e.meshes.forEach(applyMat));
+            
             captureFrame(arrayObj, "image/png");
+            
             restores.forEach(o => o.mesh.material = o.mat);
         };
 
@@ -3106,6 +3435,9 @@ class YedpViewport {
 
             setVisibility('alpha'); this.resetCamera();
             executeMaterialPass('alpha', results.alpha);
+
+            setVisibility('textured'); this.resetCamera();
+            executeMaterialPass('textured', results.textured);
 
             await new Promise(r => setTimeout(r, 10)); 
         }
