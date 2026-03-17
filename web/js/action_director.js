@@ -1071,21 +1071,18 @@ class YedpViewport {
                     let tau = t_eval - item.startTime;
                     
                     if (c.loop) {
-                        // Modulo allows circular time-wrap backwards to capture fade-in overlaps!
                         tau = tau % c.duration;
                         if (tau < 0) tau += c.duration;
                     } else {
-                        // Clamp slightly before duration end
                         if (i === seq.length - 1 && tau >= item.duration - 0.001) {
                             tau = Math.max(0, item.duration - 0.001); 
                         }
                     }
                     
                     if (tau >= -0.001 && tau <= item.duration + 0.001) {
-                        tau = Math.max(0, Math.min(item.duration, tau)); // perfect clamp
+                        tau = Math.max(0, Math.min(item.duration, tau)); 
                         let weight = 1.0;
                         
-                        // Compute crossfade weights dynamically for evaluating frame
                         if (item.blendIn > 0 && tau <= item.blendIn) {
                             weight = tau / item.blendIn;
                         }
@@ -1106,35 +1103,28 @@ class YedpViewport {
                     }
                 });
                 
-                c.mixer.update(0); // Trigger standard engine update based on our forces
+                c.mixer.update(0); 
 
-                // ROOT MOTION LOGIC (Perfected: Tracks Dominant Unblended Velocity via Interpolant)
+                // ROOT MOTION LOGIC
                 if (c.rootBone) {
-                    // NEW: Reset root integration if rewound to exactly 0, or if slider is dragged backward manually
                     if (t === 0 || (t < c.lastEvalTime && !this.isPlaying)) {
                         c.continuousPos.set(0, 0, 0);
-                        c.lastDomTau = -1; // Force a delta skip on the first frame after rewind
+                        c.lastDomTau = -1; 
                     }
 
                     if (c.useRootMotion && domItem && domItem.rootInterpolant) {
                         let rawPosArr = domItem.rootInterpolant.evaluate(domTau);
                         let currentRawPos = new this.THREE.Vector3(rawPosArr[0], rawPosArr[1], rawPosArr[2]);
                         
-                        // Detect if the timeline jumped, or the sequence clip changed, or the clip looped
                         if (c.lastDomItem !== domItem || domTau < c.lastDomTau - 0.01 || Math.abs(domTau - c.lastDomTau) > 0.5) {
                             c.lastRawPos.copy(currentRawPos);
                         } else {
                             let posDelta = currentRawPos.clone().sub(c.lastRawPos);
-                            
-                            // Only accumulate horizontal X/Z translation directly from the raw track delta.
-                            // This entirely ignores the 0.5s crossfade pulling the character backwards!
                             c.continuousPos.x += posDelta.x;
                             c.continuousPos.z += posDelta.z;
                             c.lastRawPos.copy(currentRawPos);
                         }
                         
-                        // Overwrite the blended X/Z position with our continuous integrated position,
-                        // but retain the native Y position (bounce) from the mixer!
                         c.rootBone.position.set(c.continuousPos.x, c.rootBone.position.y, c.continuousPos.z);
                         
                         c.lastDomItem = domItem;
@@ -1146,12 +1136,11 @@ class YedpViewport {
                         c.lastDomTau = -1;
                     }
                     
-                    c.lastEvalTime = t; // Update for next frame's rewind check
+                    c.lastEvalTime = t; 
                 }
             }
         });
 
-        // Simple single-clip environment updates using setTime to strictly freeze blendshapes.
         this.environments.forEach(e => {
             if(e.action && e.duration > 0) { 
                 let evalTime = e.loop ? (t % e.duration) : Math.max(0, Math.min(t, e.duration - 0.001));
@@ -1159,13 +1148,13 @@ class YedpViewport {
             }
         });
         
+        // PERFECTED CAMERA UPDATE: Replaced action.time with strict mixer.setTime
         if (this.cameraAction && this.cameraMixer) {
             const d = this.cameraAction.getClip().duration;
-            this.cameraAction.time = (t % d);
-            this.cameraMixer.update(0);
+            this.cameraMixer.setTime(t % d);
         }
 
-        // Apply Native Face Mocaps (Additive Auto-Scaling Delta)
+        // Apply Native Face Mocaps
         this.mocapBindings.forEach(binding => {
             const char = this.characters.find(c => c.id == binding.charId);
             const mocap = this.recordedMocaps.find(m => m.id === binding.mocapId);
@@ -2248,16 +2237,29 @@ class YedpViewport {
                 let animTarget = model.scene || model;
                 
                 this.cameraAnimGroup.add(animTarget);
-                // BUG FIX: Added 'this.THREE.' which was missing and causing a silent exception
                 this.cameraMixer = new this.THREE.AnimationMixer(animTarget);
+                
                 this.cameraAction = this.cameraMixer.clipAction(clip);
+                this.cameraAction.setLoop(this.THREE.LoopRepeat);
                 this.cameraAction.play();
                 
-                this.cameraAnimNode = animTarget.getObjectByProperty('isCamera', true) || animTarget;
+                // PERFECTED TARGETING: Traverse hierarchy if native isCamera flag fails (common in FBX)
+                let foundCam = animTarget.getObjectByProperty('isCamera', true);
+                if (!foundCam) {
+                    animTarget.traverse(child => {
+                        if (!foundCam && child.name.toLowerCase().includes('camera')) {
+                            foundCam = child;
+                        }
+                    });
+                }
+                
+                this.cameraAnimNode = foundCam || animTarget;
                 console.log("[Yedp] Bound custom animated camera tracking to:", this.cameraAnimNode.name);
                 this.forceUpdateFrame();
             }
-        } catch(e) { console.error("Camera Anim Load Error:", e); }
+        } catch(e) { 
+            console.error("Camera Anim Load Error:", e); 
+        }
     }
 
     // --- LOGIC: LIGHTING ---
