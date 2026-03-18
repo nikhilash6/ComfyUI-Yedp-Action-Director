@@ -3274,20 +3274,42 @@ class YedpViewport {
         if (this.isBaking || !this.renderer || !vpDiv || !this.camera) return;
         const w = vpDiv.clientWidth; const h = vpDiv.clientHeight;
         if (w && h) {
-            this.renderer.setSize(w, h);
-            const aspect = w / h;
-            if (this.perspCam) { this.perspCam.aspect = aspect; this.perspCam.updateProjectionMatrix(); }
+            this.renderer.setSize(w, h, false);
+            
+            const aspectContainer = w / h; 
+            const aspectTarget = this.renderWidth / this.renderHeight;
+            let gw, gh;
+            
+            // The gate has a 20px padding on the tightest dimension
+            if (aspectContainer > aspectTarget) { 
+                gh = h - 20; 
+                gw = gh * aspectTarget; 
+            } else { 
+                gw = w - 20; 
+                gh = gw / aspectTarget; 
+            }
+            
+            if(this.gate) { 
+                this.gate.style.width = `${gw}px`; 
+                this.gate.style.height = `${gh}px`; 
+            }
+
+            // --- PERFECT FRAMING FIX ---
+            // We tell the cameras to frame perfectly to the gate's FOV/Frustum, but offset onto the larger canvas
+            if (this.perspCam) {
+                this.perspCam.aspect = aspectTarget; 
+                this.perspCam.setViewOffset(gw, gh, (gw - w) / 2, (gh - h) / 2, w, h);
+                this.perspCam.updateProjectionMatrix();
+            }
             if (this.orthoCam) {
                 const frustumSize = 4.0;
-                this.orthoCam.left = -frustumSize * aspect / 2; this.orthoCam.right = frustumSize * aspect / 2;
-                this.orthoCam.top = frustumSize / 2; this.orthoCam.bottom = -frustumSize / 2;
+                this.orthoCam.left = -frustumSize * aspectTarget / 2;
+                this.orthoCam.right = frustumSize * aspectTarget / 2;
+                this.orthoCam.top = frustumSize / 2;
+                this.orthoCam.bottom = -frustumSize / 2;
+                this.orthoCam.setViewOffset(gw, gh, (gw - w) / 2, (gh - h) / 2, w, h);
                 this.orthoCam.updateProjectionMatrix();
             }
-            const aspectContainer = w / h; const aspectTarget = this.renderWidth / this.renderHeight;
-            let gw, gh;
-            if (aspectContainer > aspectTarget) { gh = h - 20; gw = gh * aspectTarget; } 
-            else { gw = w - 20; gh = gw / aspectTarget; }
-            if(this.gate) { this.gate.style.width = `${gw}px`; this.gate.style.height = `${gh}px`; }
         }
     }
 
@@ -3309,27 +3331,32 @@ class YedpViewport {
         this.lights.forEach(l => l.helper.visible = false);
 
         const originalSize = new THREE.Vector2(); this.renderer.getSize(originalSize);
-        const originalAspect = this.camera.aspect || (originalSize.width / originalSize.height);
-        const originalZoom = this.camera.zoom; const originalBg = this.scene.background;
+        //const originalAspect = this.camera.aspect || (originalSize.width / originalSize.height);
+        //const originalZoom = this.camera.zoom; 
+        const originalBg = this.scene.background;
         
-        const vpArea = this.container.querySelector(".yedp-vp-area");
-        if (vpArea) {
-            const vpW = vpArea.clientWidth; const vpH = vpArea.clientHeight;
-            const vpAspect = vpW / vpH; const targetAspect = this.renderWidth / this.renderHeight;
-            if (vpAspect < targetAspect) this.camera.zoom = originalZoom * (targetAspect / vpAspect);
-            else this.camera.zoom = originalZoom;
+        // --- PERFECT FRAMING BAKE FIX ---
+        // 1. Force exact resolution size
+        //this.renderer.setSize(this.renderWidth, this.renderHeight);
+        this.renderer.setSize(this.renderWidth, this.renderHeight, false);
+        const targetRenderAspect = this.renderWidth / this.renderHeight;
+        
+        // 2. Clear view offset so it strictly renders the raw gate boundaries
+        if (this.perspCam) {
+            this.perspCam.aspect = targetRenderAspect;
+            if (this.perspCam.clearViewOffset) this.perspCam.clearViewOffset();
+            this.perspCam.updateProjectionMatrix();
         }
 
-        this.renderer.setSize(this.renderWidth, this.renderHeight);
-        const targetRenderAspect = this.renderWidth / this.renderHeight;
-        this.perspCam.aspect = targetRenderAspect; this.perspCam.updateProjectionMatrix();
-
-        const frustumSize = 4.0;
-        this.orthoCam.left = -frustumSize * targetRenderAspect / 2;
-        this.orthoCam.right = frustumSize * targetRenderAspect / 2;
-        this.orthoCam.top = frustumSize / 2;
-        this.orthoCam.bottom = -frustumSize / 2;
-        this.orthoCam.updateProjectionMatrix();
+        if (this.orthoCam) {
+            const frustumSize = 4.0;
+            this.orthoCam.left = -frustumSize * targetRenderAspect / 2;
+            this.orthoCam.right = frustumSize * targetRenderAspect / 2;
+            this.orthoCam.top = frustumSize / 2;
+            this.orthoCam.bottom = -frustumSize / 2;
+            if (this.orthoCam.clearViewOffset) this.orthoCam.clearViewOffset();
+            this.orthoCam.updateProjectionMatrix();
+        }
 
         const totalNodeFrames = this.getWidgetValue("frame_count", 48);
         const fps = this.getWidgetValue("fps", 24);
@@ -3443,21 +3470,19 @@ class YedpViewport {
         }
         
         // Restoration
-        this.renderer.setSize(originalSize.width, originalSize.height);
-        if (this.perspCam) this.perspCam.aspect = originalAspect;
-        if (this.orthoCam) {
-            const aspectTarget = originalSize.width / originalSize.height;
-            const frustumSize = 4.0;
-            this.orthoCam.left = -frustumSize * aspectTarget / 2; this.orthoCam.right = frustumSize * aspectTarget / 2;
-            this.orthoCam.top = frustumSize / 2; this.orthoCam.bottom = -frustumSize / 2;
-        }
+        this.isBaking = false; 
+        //this.renderer.setSize(originalSize.width, originalSize.height);
+        this.renderer.setSize(originalSize.width, originalSize.height, false);
         
-        this.camera.zoom = originalZoom; 
+        // Let onResize cleanly restore the offset view mapping for the layout UI
+        const vpAreaRestore = this.container.querySelector(".yedp-vp-area");
+        if (vpAreaRestore) this.onResize(vpAreaRestore);
+        
         if(this.isDepthMode) { this.camera.near = this.userNear; this.camera.far = this.userFar; } 
         else this.resetCamera();
         this.camera.updateProjectionMatrix();
 
-        toggleHelpers(true); this.scene.background = originalBg; this.isBaking = false;
+        toggleHelpers(true); this.scene.background = originalBg; 
         
         this.lights.forEach(l => l.helper.visible = l.type !== 'ambient');
         if (this.selected.obj) this.selectObject(this.selected.obj, this.selected.type, this.selected.id);
