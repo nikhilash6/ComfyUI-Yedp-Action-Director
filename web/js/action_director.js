@@ -43,8 +43,11 @@ const loadThreeJS = async () => {
             const { BVHLoader } = await import(new URL("./BVHLoader.js", baseUrl).href);
             const { PLYLoader } = await import(new URL("./PLYLoader.js", baseUrl).href);
             const { clone } = await import(new URL("./SkeletonUtils.js", baseUrl).href);
+            const splatLib = await import(new URL("./gaussian-splats-3d.module.js", baseUrl).href);
+            const DropInViewer = splatLib.DropInViewer || splatLib.default?.DropInViewer;
 
-            resolve({ THREE, OrbitControls, TransformControls, GLTFLoader, FBXLoader, BVHLoader, PLYLoader, SkeletonUtils: { clone } });
+            resolve({ THREE, OrbitControls, TransformControls, GLTFLoader, FBXLoader, BVHLoader, PLYLoader, SkeletonUtils: { clone }, DropInViewer });
+            
         } catch (e) {
             console.error("[Yedp] Critical Engine Load Failure:", e);
             reject(e);
@@ -298,6 +301,7 @@ class EnvironmentInstance {
         this.loop = true;
         this.envFile = "none";
         this.meshes = [];
+        this.splatViewer = null;
     }
 
     destroy(scene) {
@@ -425,6 +429,7 @@ class YedpViewport {
             this.FBXLoader = libs.FBXLoader; 
             this.BVHLoader = libs.BVHLoader;
             this.PLYLoader = libs.PLYLoader;
+            this.DropInViewer = libs.DropInViewer;
             window._YEDP_SKEL_UTILS = libs.SkeletonUtils;
 
             const createMats = () => {
@@ -2528,6 +2533,7 @@ class YedpViewport {
         if(!filename || filename === "none") {
             envObj.group.clear();
             envObj.meshes = [];
+            envObj.splatViewer = null;
             envObj.mixer.stopAllAction();
             envObj.action = null;
             if(info) info.innerText = `[Meshes: 0]`;
@@ -2537,18 +2543,38 @@ class YedpViewport {
         envObj.envFile = filename;
         const isFBX = filename.toLowerCase().endsWith(".fbx");
         const isPLY = filename.toLowerCase().endsWith(".ply");
-        const url = `/view?filename=${filename}&type=input&subfolder=yedp_envs&t=${Date.now()}`;
+        const isSPLAT = filename.toLowerCase().endsWith(".splat") || filename.toLowerCase().endsWith(".ksplat") || filename.toLowerCase().endsWith(".spz") || filename.toLowerCase().endsWith(".sog") || (isPLY && filename.toLowerCase().includes("splat"));
+        const ext = filename.split('.').pop().toLowerCase();
+        const url = `/view?filename=${filename}&type=input&subfolder=yedp_envs&t=${Date.now()}#.${ext}`;
         try {
             let targetObj;
             let model;
 
-            if (isFBX) {
+            if (isSPLAT) {
+                
+                const viewer = new this.DropInViewer({
+                    gpuAcceleratedSort: false,     // BUGFIX 1: Stops the transparent/black screen rendering bug
+                    sharedMemoryForWorkers: false,
+                    rootElement: this.container    // BUGFIX 2: Forces the viewer to see the ComfyUI canvas size
+                });
+                
+                await viewer.addSplatScene(url, {
+                    showLoadingUI: false,
+                    progressiveLoad: false
+                    // NOTE: splatAlphaRemovalThreshold has been deleted to stop the crash!
+                });
+                
+                // PATCH: Automatically fix the COLMAP upside-down coordinate system
+                viewer.rotation.x = Math.PI;
+
+                targetObj = viewer;
+                model = targetObj;
+            } else if (isFBX) {
                 model = await new this.FBXLoader().loadAsync(url);
                 targetObj = model;
             } else if (isPLY) {
                 const geometry = await new this.PLYLoader().loadAsync(url);
                 geometry.computeVertexNormals();
-                // Gaussian Splat point clouds export with vertex colors
                 if (geometry.attributes.color) {
                     const mat = new this.THREE.PointsMaterial({ size: 0.05, vertexColors: true });
                     targetObj = new this.THREE.Points(geometry, mat);
@@ -2564,37 +2590,43 @@ class YedpViewport {
             
             envObj.group.clear();
             envObj.meshes = [];
+            envObj.splatViewer = null; // Clear old reference
             envObj.group.add(targetObj);
             
-            targetObj.traverse((child) => {
-                child.visible = true; 
-                if(child.isMesh || child.isSkinnedMesh || child.isPoints || child.type === 'Mesh' || child.type === 'SkinnedMesh' || child.type === 'Points') {
-                    child.castShadow = true;
-                    child.receiveShadow = true;
-                    if (child.isPoints || child.type === 'Points') {
-                        child.customDepthMaterial = this.matsStatic.depthPointsShadow;
-                        child.customDistanceMaterial = this.matsStatic.distancePointsShadow;
+            if (!isSPLAT) {
+                targetObj.traverse((child) => {
+                    child.visible = true; 
+                    if(child.isMesh || child.isSkinnedMesh || child.isPoints || child.type === 'Mesh' || child.type === 'SkinnedMesh' || child.type === 'Points') {
+                        child.castShadow = true;
+                        child.receiveShadow = true;
+                        if (child.isPoints || child.type === 'Points') {
+                            child.customDepthMaterial = this.matsStatic.depthPointsShadow;
+                            child.customDistanceMaterial = this.matsStatic.distancePointsShadow;
+                        }
+                        child.frustumCulled = false; 
+                        
+                        if (child.material) {
+                            const fixMat = (mat) => {
+                                if (mat.transparent && mat.opacity < 0.01) {
+                                    mat.transparent = false;
+                                    mat.opacity = 1.0;
+                                }
+                                mat.side = this.THREE.DoubleSide; 
+                            };
+                            if (Array.isArray(child.material)) child.material.forEach(fixMat);
+                            else fixMat(child.material);
+                        }
+                        
+                        envObj.meshes.push(child);
+                        if(!this.originalMaterials.has(child)) this.originalMaterials.set(child, child.material);
                     }
-                    child.frustumCulled = false; 
-                    
-                    if (child.material) {
-                        const fixMat = (mat) => {
-                            if (mat.transparent && mat.opacity < 0.01) {
-                                mat.transparent = false;
-                                mat.opacity = 1.0;
-                            }
-                            mat.side = this.THREE.DoubleSide; 
-                        };
-                        if (Array.isArray(child.material)) child.material.forEach(fixMat);
-                        else fixMat(child.material);
-                    }
-                    
-                    envObj.meshes.push(child);
-                    if(!this.originalMaterials.has(child)) this.originalMaterials.set(child, child.material);
-                }
-            });
+                });
+            } else {
+                // Store splat reference explicitly to bypass the standard materials map but control visibility!
+                envObj.splatViewer = targetObj;
+            }
             
-            if(info) info.innerText = `[Meshes: ${envObj.meshes.length}]`;
+            if(info) info.innerText = isSPLAT ? `[Gaussian Splat]` : `[Meshes: ${envObj.meshes.length}]`;
 
             let clip = isFBX ? model.animations?.[0] : (!isPLY ? (model.animations?.[0] || model.scene?.animations?.[0] || model.asset?.animations?.[0]) : null);
             if(clip) {
@@ -3232,6 +3264,10 @@ class YedpViewport {
                 m.visible = true; 
                 m.material = getMat(m);
             });
+            // NEW LOGIC: Hide Splats if in Depth or Shaded mode, as they don't support those materials natively
+            if (e.splatViewer) {
+                e.splatViewer.visible = !isDepth && !isShaded;
+            }
         });
 
         if (isDepth) this.updateCameraBounds();
@@ -3390,7 +3426,14 @@ class YedpViewport {
                 c.activeDepthMeshes.forEach(m => m.visible = showDepth);
                 c.skeletonHelper.visible = false; 
             });
-            this.environments.forEach(e => e.meshes.forEach(m => m.visible = showEnv));
+            this.environments.forEach(e => {
+                e.meshes.forEach(m => m.visible = showEnv);
+                // NEW LOGIC: Splats should ONLY appear in the textured pass (or default background).
+                // They will break Depth/Normal/Canny passes if left visible.
+                if (e.splatViewer) {
+                    e.splatViewer.visible = (mode === 'textured');
+                }
+            });
             
             this.scene.background = new THREE.Color(0x000000); 
         };
