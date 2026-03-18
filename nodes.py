@@ -16,7 +16,7 @@ if "yedp_anims" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_anims"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_anims")], {".glb", ".fbx", ".bvh"})
 
 if "yedp_envs" not in folder_paths.folder_names_and_paths:
-    folder_paths.folder_names_and_paths["yedp_envs"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_envs")], {".glb", ".gltf", ".fbx", ".obj", ".ply"})
+    folder_paths.folder_names_and_paths["yedp_envs"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_envs")], {".glb", ".gltf", ".fbx", ".obj", ".ply", ".splat", ".ksplat", ".spz", ".sog"})
 
 # Added: Register yedp_cams folder
 if "yedp_cams" not in folder_paths.folder_names_and_paths:
