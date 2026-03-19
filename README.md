@@ -123,4 +123,24 @@ This project is open-source and available under the **MIT License**.
 
 ## **❤️ Credits**
 
-created by Yedp. Special thanks to mizumori-bit (https://github.com/mizumori-bit/) for his contribution on Orthographic/Views/Lighting implementation
+created by Yedp. Special thanks to mizumori-bit (https://github.com/mizumori-bit/) for his contribution on Orthographic/Views/Lighting implementation.
+
+Yedp-Action-Director is built upon the incredible work of the open-source community.
+
+-------------------
+
+**🛠️ Core Engine & Libraries**
+Three.js: The backbone of the 3D viewport, including essential modules like GLTFLoader, FBXLoader, BVHLoader, and SkeletonUtils.
+
+MediaPipe (Google): Powers the high-performance, local facial motion capture and landmark detection.
+
+GaussianSplats3D (mkkellogg): For the optimized implementation and rendering of 3D Gaussian Splatting within the Three.js environment.
+
+fflate: Used for high-speed, memory-efficient decompression of 3D asset files.
+
+-------------------
+
+**📜 Format & Asset Support**
+PLY Loader: For supporting the import and visualization of PLY point cloud data.
+
+Mixamo & HY-MOTION: For providing the skeletal naming conventions that our auto-retargeting system follows.
