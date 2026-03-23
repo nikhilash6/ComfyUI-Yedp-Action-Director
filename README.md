@@ -6,9 +6,7 @@ https://github.com/user-attachments/assets/87328a44-5249-42f3-8b54-de18e7545398
 https://github.com/user-attachments/assets/9e7d56c9-e2cd-4ff6-a505-93e4eabae959
 
 
-
 **A powerful 3D viewport node for ComfyUI to direct, preview, and batch-render 3D character animations, environments, and custom cameras for ControlNet workflows.**
-
 
 ## **🌟 Overview**
 
@@ -30,6 +28,9 @@ https://github.com/user-attachments/assets/9e7d56c9-e2cd-4ff6-a505-93e4eabae959
   * **🟠 Shaded:** Clay-style renders for spatial and lighting reference.  
   * **🏁 Alpha:** Pure black and white character/prop matte masks for compositing.  
   * **🎨 Textured:** Full RGB render utilizing original material base colors and textures.
+* **Feeling lost? Click the "help" Icon in the Gizmo's tab!**
+
+<img width="105" height="94" alt="image" src="https://github.com/user-attachments/assets/de1eec41-84ea-4c8f-94b3-74e25b3d0ac0" />
 
 ## **🚀 What's New in V9.28 (Face Mocap & Sequencer Update)**
 
