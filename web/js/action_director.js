@@ -14,6 +14,7 @@ import { api } from "/scripts/api.js";
  * - Feature: Added JSON disk-saving and loading for recorded Mocap tracks!
  * - Feature: Continuous Root Motion Tracking! Automatically strips loop snapping and integrates spatial movement indefinitely. 
  * - Feature: Added PLYLoader support for Gaussian Splats / Point Clouds and a new TEXTURED Render pass!
+ * - UI Update: Added Integrated Help / Manual Menu overlay loading external HTML file.
  */
 
 const loadThreeJS = async () => {
@@ -408,6 +409,7 @@ class YedpViewport {
         this.uiMocapDropdowns = []; 
         
         this.uiTransformInputs = {};
+        this.helpModal = null; // Store reference to help modal
 
         this.isHovered = false;
         this._handleKeyDown = this.handleKeyDown.bind(this);
@@ -712,6 +714,9 @@ class YedpViewport {
             this.buildViewNav(viewportDiv);
             this.buildSidebar();
             
+            // Build the help modal right after layout is structured
+            this.buildHelpModal(this.container);
+
             this.addLight("ambient");
             this.addLight("directional");
             const dl = this.lights[1].group;
@@ -738,6 +743,57 @@ class YedpViewport {
         } catch (e) {
             this.container.innerHTML = `<div style="color:red; padding:20px;">Init Error: ${e.message}</div>`;
         }
+    }
+
+    buildHelpModal(container) {
+        this.helpModal = document.createElement("div");
+        Object.assign(this.helpModal.style, {
+            position: "absolute", top: "0", left: "0", width: "100%", height: "100%",
+            backgroundColor: "rgba(0, 0, 0, 0.8)", zIndex: "9999",
+            display: "none", justifyContent: "center", alignItems: "center", backdropFilter: "blur(4px)"
+        });
+
+        const contentBox = document.createElement("div");
+        Object.assign(contentBox.style, {
+            width: "80%", maxWidth: "800px", height: "85%", backgroundColor: "#1a1a1a",
+            border: "1px solid #444", borderRadius: "8px", display: "flex", flexDirection: "column",
+            boxShadow: "0 10px 40px rgba(0,0,0,0.8)", overflow: "hidden"
+        });
+
+        const header = document.createElement("div");
+        Object.assign(header.style, {
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            padding: "12px 20px", borderBottom: "1px solid #333", backgroundColor: "#222"
+        });
+        header.innerHTML = `<span style="color:#00d2ff; font-weight:bold; font-size:16px;">🎬 Yedp Action Director - User Manual</span>`;
+
+        const closeBtn = document.createElement("button");
+        closeBtn.innerText = "✖";
+        Object.assign(closeBtn.style, {
+            background: "transparent", border: "none", color: "#ccc", cursor: "pointer", fontSize: "16px", padding: "4px"
+        });
+        closeBtn.onmouseover = () => closeBtn.style.color = "#fff";
+        closeBtn.onmouseout = () => closeBtn.style.color = "#ccc";
+        closeBtn.onclick = () => this.helpModal.style.display = "none";
+        header.appendChild(closeBtn);
+
+        const body = document.createElement("div");
+        body.className = "manual-body";
+        Object.assign(body.style, {
+            padding: "24px", overflowY: "auto", color: "#ccc", fontSize: "13px", lineHeight: "1.6", fontFamily: "sans-serif"
+        });
+        
+        // Let's populate an empty loading state
+        body.innerHTML = `<div style="text-align:center; padding: 40px; color:#888;">Loading manual...</div>`;
+
+        contentBox.append(header, body);
+        this.helpModal.appendChild(contentBox);
+        container.appendChild(this.helpModal);
+
+        // Close when clicking outside the box
+        this.helpModal.addEventListener('click', (e) => {
+            if(e.target === this.helpModal) this.helpModal.style.display = "none";
+        });
     }
 
     createRimTexture() {
@@ -1358,16 +1414,49 @@ class YedpViewport {
             return b;
         };
 
-        const pathMove = `<path d="M5 9l-3 3 3 3M9 5l3-3 3 3M9 19l3 3-3 3M19 9l3 3-3 3M2 12h20M12 2v20"/>`;
+        const pathMove = `<path d="M5 9l-3 3 3 3M9 5l3-3 3 3M9 19l3 3 3-3M19 9l3 3-3 3M2 12h20M12 2v20"/>`;
         const pathRot = `<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>`;
         const pathScale = `<path d="M21 3l-6 6"/><path d="M21 3v6"/><path d="M21 3h-6"/><path d="M3 21l6-6"/><path d="M3 21v-6"/><path d="M3 21h6"/><path d="M14 10l-4 4"/>`;
         const pathDeselect = `<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>`;
+        const pathHelp = `<circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01"></path>`;
+
+        const btnHelp = createIconBtn("help", pathHelp, "User Manual", () => {
+            if (this.helpModal) {
+                this.helpModal.style.display = "flex";
+                if (!this.helpModal.dataset.loaded) {
+                    const body = this.helpModal.querySelector('.manual-body');
+                    body.innerHTML = `<div style="text-align:center; padding: 40px; color:#888;">Loading manual...</div>`;
+                    
+                    fetch(new URL("./yedp_manual.html", import.meta.url).href)
+                        .then(response => {
+                            if (!response.ok) throw new Error("Manual file not found.");
+                            return response.text();
+                        })
+                        .then(html => {
+                            body.innerHTML = html;
+                            this.helpModal.dataset.loaded = "true";
+                        })
+                        .catch(err => {
+                            body.innerHTML = `
+                                <div style="color:#ff5555; padding:20px; text-align:center;">
+                                    <h3>Failed to load manual</h3>
+                                    <p>${err.message}</p>
+                                    <p>Make sure <b>yedp_manual.html</b> is placed in the same folder as <b>action_director.js</b>.</p>
+                                </div>`;
+                        });
+                }
+            }
+        });
+        btnHelp.style.marginTop = "8px"; 
+        btnHelp.style.color = "#ffaa00"; 
+        btnHelp.style.borderColor = "#ffaa00";
 
         panel.append(
             createIconBtn("translate", pathMove, "Move (G)", () => { this.transformControls.setMode("translate"); this.updateGizmoUI("translate"); }),
             createIconBtn("rotate", pathRot, "Rotate (R)", () => { this.transformControls.setMode("rotate"); this.updateGizmoUI("rotate"); }),
             createIconBtn("scale", pathScale, "Scale (S)", () => { if(['character', 'environment'].includes(this.selected.type)) { this.transformControls.setMode("scale"); this.updateGizmoUI("scale"); } }),
-            createIconBtn("deselect", pathDeselect, "Deselect", () => { this.selectObject(null, null, null); })
+            createIconBtn("deselect", pathDeselect, "Deselect", () => { this.selectObject(null, null, null); }),
+            btnHelp
         );
         vpDiv.appendChild(panel);
         this.updateGizmoUI("translate");
@@ -1376,6 +1465,8 @@ class YedpViewport {
     updateGizmoUI(mode) {
         Object.keys(this.gizmoBtns).forEach(k => {
             const b = this.gizmoBtns[k];
+            if (k === 'help') return; 
+            
             if (k === mode) {
                 b.dataset.active = "true"; b.style.background = "#00d2ff"; b.style.color = "#000"; b.style.borderColor = "#00d2ff";
             } else {
