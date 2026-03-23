@@ -116,7 +116,9 @@ The parser relies on a specific (but forgiving) naming convention in your node h
 * **"Animation not playing":** The node has been built to play animations from Mixamo. The rig needs to follow a similar prefix structure and a few known synonyms such as "Pelvis" for "Hips". Support for HY-MOTION rig naming conventions is also included.  
 * **"Viewport is invisible on load":** *Solution:* Depending on your browser zoom, the viewport might initialize at size 0. Simply **resize the node slightly** by dragging the bottom-right corner, and the viewport will snap into place.  
 * **"Animation/Environment not found":** Ensure your files are in the correct `input/` subfolders. Click your custom **↻ SYNC FOLDERS** button in the ComfyUI menu if you just added them!
-* **"imported .ply appears "mesh mangling":** The default .ply import function is set to import point clouds, add "_splat.ply" suffix to treat it as a true splat!
+* **"imported .ply doesn't show":** .ply files are imported as Gaussion Splat by default, if your .ply file are points cloud, make sure to press the **↻ SYNC FOLDERS** button to make the settings appear and uncheck "Render as Gaussian Splat" (currently doesn't show dynamically, hopefully will be fixed in the future!)
+ <img width="285" height="144" alt="image" src="https://github.com/user-attachments/assets/53625815-4664-4248-b4f2-7afb2638eb3d" />
+
 
 ## **📜 License**
 
