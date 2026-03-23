@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Yedp Action Director Manual</title>
+    <style>
+        .manual-wrapper { 
+            font-family: sans-serif; 
+            color: #ccc; 
+            line-height: 1.6; 
+        }
+        .manual-wrapper h1 { 
+            color: #00d2ff; 
+            font-size: 20px; 
+            border-bottom: 1px solid #333; 
+            padding-bottom: 8px; 
+            margin-top: 0; 
+        }
+        .manual-wrapper h3 { 
+            color: #4ade80; 
+            border-bottom: 1px solid #333; 
+            padding-bottom: 4px; 
+            margin-top: 32px; 
+            font-size: 16px; 
+        }
+        .manual-wrapper h4 { 
+            color: #fff; 
+            margin-top: 20px; 
+            font-size: 14px; 
+        }
+        .manual-wrapper ul { 
+            margin-top: 8px; 
+            padding-left: 20px; 
+        }
+        .manual-wrapper li { 
+            margin-bottom: 6px; 
+        }
+        .manual-wrapper strong { 
+            color: #fff; 
+        }
+        .manual-wrapper .highlight { 
+            color: #00d2ff; 
+            font-weight: bold; 
+        }
+        .manual-wrapper .warning { 
+            color: #ffaa00; 
+            font-weight: bold; 
+        }
+        .manual-wrapper .image-block { 
+            margin: 16px 0; 
+            padding: 12px; 
+            background: #111; 
+            border: 1px solid #333; 
+            border-radius: 6px; 
+            text-align: center; 
+        }
+        .manual-wrapper .image-block img { 
+            max-width: 100%; 
+            border-radius: 4px; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5); 
+        }
+        .manual-wrapper .image-caption { 
+            font-size: 11px; 
+            color: #888; 
+            margin-top: 8px; 
+            font-style: italic; 
+        }
+        .manual-wrapper .code-block { 
+            font-family: monospace; 
+            font-size: 12px; 
+            background: #111; 
+            padding: 12px; 
+            border-radius: 4px; 
+            border: 1px solid #333; 
+            color: #aaa; 
+        }
+        .manual-wrapper .code-block span { 
+            color: #888; 
+        }
+    </style>
+</head>
+<body>
+    <div class="manual-wrapper">
+        <p>Welcome to the <strong>Yedp Action Director</strong>! This powerful ComfyUI custom node acts as a miniature 3D engine directly inside your workflow. It allows you to pose 3D characters, sequence animations, apply facial motion capture, light scenes, and load environments (including Gaussian Splat .ply files).</p>
+        <p>When you are ready, the node "bakes" your scene into 7 perfectly aligned image batches (Pose, Depth, Canny, Normal, Shaded, Alpha, and Textured) ready to be routed directly into ControlNet.</p>
+
+        <h3>1. Initial Setup & Node Resolution</h3>
+        <p>Before diving into the 3D viewport, you control the core properties of your scene using the standard ComfyUI input widgets on the node itself.</p>
+        
+        <div class="image-block">
+            <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/setup_widgets.png" alt="Node Setup Widgets" onerror="this.outerHTML='<div style=\'color:#888; padding:20px;\'>[ Missing Image: Please add setup_widgets.png to manual_images/ folder ]</div>'">
+        </div>
+
+        <ul>
+            <li><span class="highlight">width / height:</span> Sets the exact pixel resolution of your final rendered passes. The internal 3D camera will automatically adjust its aspect ratio to match these dimensions.</li>
+            <li><span class="highlight">frame_count:</span> The total number of frames to bake for your animation.</li>
+            <li><span class="highlight">fps:</span> The framerate (Frames Per Second) used to calculate animation speed and motion capture playback.</li>
+        </ul>
+
+        <h3>2. The Main Interface & Viewport</h3>
+        <p>The 3D Viewport is divided into three main areas: the <strong>Top Header Bar</strong>, the <strong>3D Canvas</strong>, and the <strong>Bottom Timeline</strong>.</p>
+        
+        <h4>The Top Header Bar</h4>
+        <p>This bar controls your viewport rendering modes and baking triggers.</p>
+
+        <div class="image-block">
+            <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/header_bar.png" alt="Header Bar UI" onerror="this.outerHTML='<div style=\'color:#888; padding:20px;\'>[ Missing Image: Please add header_bar.png to manual_images/ folder ]</div>'">
+        </div>
+
+        <ul>
+            <li><span class="highlight">Render Toggles:</span> Switch how the viewport previews your scene.
+                <ul>
+                    <li><em>Textured</em> displays original colors/materials.</li>
+                    <li><em>Shaded</em> displays standard grey materials.</li>
+                    <li><em>Depth</em> previews the Z-Depth pass.</li>
+                    <li><em>Skel</em> toggles the visibility of the character bone helpers.</li>
+                </ul>
+            </li>
+            <li><span class="highlight">Depth Controls (NEAR / FAR):</span> Only visible in Depth mode. These dictate the minimum and maximum clipping range of the depth map. Adjust these to get the best contrast in your depth output!</li>
+            <li><span class="highlight">↻ SYNC FOLDERS:</span> Refreshes the custom_nodes/ComfyUI-Yedp-Action-Director/web and input/yedp_... folders. Click this if you just added a new 3D model or animation to your folders and need it to show up in the menus.</li>
+            <li><span class="warning">BAKE FRAME / BAKE V9.28:</span> Triggers the rendering process. <em>Bake Frame</em> renders only the current frame, while <em>Bake V9.28</em> renders the entire frame count.</li>
+        </ul>
+
+        <h4>The Timeline</h4>
+        <p>Located at the bottom of the viewport.</p>
+        <ul>
+            <li><span class="highlight">Play/Pause Button:</span> Previews your animation loop in real-time.</li>
+            <li><span class="highlight">Scrub Slider:</span> Allows you to manually scrub through the animation frame-by-frame.</li>
+        </ul>
+
+        <h3>3. Navigation & Gizmos</h3>
+        <p>Navigating the Action Director will feel familiar if you use tools like Maya or Unity.</p>
+
+        <h4>Camera Navigation</h4>
+        <ul>
+            <li><strong>Left-Click + Drag:</strong> Orbit the camera around the target.</li>
+            <li><strong>Right-Click + Drag:</strong> Pan/Track the camera.</li>
+            <li><strong>Scroll Wheel:</strong> Zoom in and out.</li>
+        </ul>
+
+        <h4>Transform Gizmos & Hotkeys</h4>
+        <div class="image-block">
+            <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/gizmo_menu.png" alt="Transform Gizmo" style="max-width: 150px; display: inline-block; margin-right: 20px;" onerror="this.outerHTML='<span style=\'color:#888;\'>[Missing gizmo_menu.png]</span>'">
+            <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/transform_panel.png" alt="Transform Panel" style="max-width: 250px; display: inline-block; vertical-align: top;" onerror="this.outerHTML='<span style=\'color:#888;\'>[Missing transform_panel.png]</span>'">
+        </div>
+
+        <p>When you click on a Character, Light, or Environment prop, a transformation gizmo will appear. You can change the current selection position/rotation/scale and the gizmo mode using the floating widget in the top left, or by using keyboard hotkeys:</p>
+        <ul>
+            <li><span class="highlight">G:</span> Translate (Move)</li>
+            <li><span class="highlight">R:</span> Rotate</li>
+            <li><span class="highlight">S:</span> Scale (Available for Characters and Environments)</li>
+        </ul>
+
+        <h4>View Navigation Panel</h4>
+        <div class="image-block" style="text-align: left; padding-left: 20px;">
+            <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/nav_panel.png" alt="Navigation Panel" style="max-width: 150px;" onerror="this.outerHTML='<div style=\'color:#888; padding:20px;\'>[ Missing Image: nav_panel.png ]</div>'">
+        </div>
+        <p>In the top right of the viewport is a quick-navigation menu. Use this to instantly snap your camera to the <strong>Top, Bottom, Left, Right, Front</strong>, or <strong>Back</strong> of your focal point. The <strong>Reset</strong> button returns the camera to the default starting position.</p>
+
+        <h3>4. The Sidebar Categories</h3>
+        <p>The right sidebar houses all the specific controls for objects in your scene.</p>
+
+        <h4>📍 Transform</h4>
+        <p>Displays the precise numerical Transform (Position, Rotation, Scale) of your currently selected object. You can type exact values here for precision adjustments.</p>
+
+        <h4>🎥 Camera</h4>
+        <p>Controls your main rendering camera.</p>
+        
+        <div class="image-block">
+            <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/camera_panel.png" alt="Camera Panel" style="max-width: 300px;" onerror="this.outerHTML='<div style=\'color:#888; padding:20px;\'>[ Missing Image: camera_panel.png ]</div>'">
+        </div>
+        
+        <ul>
+            <li><strong>Ortho Toggle:</strong> Switches the camera between Perspective and Orthographic modes.</li>
+            <li><strong>FOV:</strong> Adjusts the Field of View for the perspective camera.</li>
+            <li><strong>Keyframing (Set Start / Set End):</strong> Allows you to create a simple camera sweep. Move the camera to your starting position and click "Set Start", then move it to the end position and click "Set End". Use the easing dropdown (e.g., <em>easeInOut</em>) to smooth the motion.</li>
+            <li><strong>Animation Import:</strong> You can load .fbx or .glb files containing camera animation data from the dropdown.</li>
+            <li><strong>Override Toggle:</strong> Checking this forces the viewport to look directly through your imported, animated camera.</li>
+            <li><strong>Fix Transform (Rx, Ry, Rz, Scl):</strong> If your imported camera faces the wrong axis (common with FBX imports from different software), use these offsets to correct it.</li>
+        </ul>
+
+        <h4>💡 Lighting</h4>
+        <p>Add custom lighting to affect the <strong>Shaded</strong> and <strong>Textured</strong> render passes.</p>
+        
+        <div class="image-block">
+            <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/lighting_panel.png" alt="Lighting Panel" style="max-width: 300px;" onerror="this.outerHTML='<div style=\'color:#888; padding:20px;\'>[ Missing Image: lighting_panel.png ]</div>'">
+        </div>
+
+        <ul>
+            <li><strong>+ Add Light:</strong> Spawns a new light source.</li>
+            <li><strong>Type:</strong> Switch between Ambient, Directional, Point, and Spot lights.</li>
+            <li><strong>Color / Int (Intensity):</strong> Adjust the look of the light.</li>
+            <li><strong>Rng (Range) / Ang (Angle):</strong> Specific controls for Point and Spot lights.</li>
+            <li><strong>Shadows Toggle:</strong> Enable or disable shadow casting for this specific light.</li>
+        </ul>
+
+        <h4>🧍 Characters</h4>
+        <p>The core of the Action Director.</p>
+        
+        <div class="image-block">
+            <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/character_panel.png" alt="Character Panel" style="max-width: 300px;" onerror="this.outerHTML='<div style=\'color:#888; padding:20px;\'>[ Missing Image: character_panel.png ]</div>'">
+        </div>
+
+        <ul>
+            <li><strong>Model Dropdown & + Add Char:</strong> Select a base .glb or .fbx rig from your web folder and click add.</li>
+            <li><strong>Rig Swapping:</strong> Inside the character card, you can change the "Model" dropdown to seamlessly replace the rig geometry while retaining all animations and transforms.</li>
+            <li><strong>Animation Sequence:</strong> You can queue multiple animations to play one after another! Click "+ Add Sequence Anim" to add slots.</li>
+            <li><strong>Blend (s):</strong> Sets the auto-crossfade duration (in seconds) between your sequential animation clips.</li>
+            <li><strong>Face Scale:</strong> Modifies the internal mapping distance for facial motion capture, ensuring expressions fit different character proportions.</li>
+            <li><strong>M / F Toggle:</strong> Switches the depth-map output between the Male and Female depth-meshes bound to your rig.</li>
+            <li><strong>Face Toggle:</strong> Hides or shows the face mesh in the OpenPose render pass.</li>
+            <li><strong>Loop vs. Root Motion:</strong> <em>Loop</em> repeats the animation sequence infinitely. <em>Root M.</em> (Root Motion) disables snapping and integrates the character's forward movement continuously through 3D space.</li>
+        </ul>
+
+        <h4>🎭 Motion Capture</h4>
+        <p>Drive character facial expressions using your webcam or a pre-recorded video file!</p>
+        
+        <div class="image-block">
+            <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/mocap_panel.png" alt="Mocap Panel" style="max-width: 300px;" onerror="this.outerHTML='<div style=\'color:#888; padding:20px;\'>[ Missing Image: mocap_panel.png ]</div>'">
+        </div>
+
+        <ul>
+            <li><strong>Source:</strong> Choose <em>Webcam</em> for live capture, or <em>Video File</em> to upload a local video.</li>
+            <li><strong>Start / Rec:</strong> Click Start to initialize MediaPipe. Click Rec to capture the motion.</li>
+            <li><em>Note for Video:</em> Recording a video file happens offline sequentially, ensuring perfect 30fps tracking with zero dropped frames.</li>
+            <li><strong>Save:</strong> Saves the tracked facial data to your local `/input/yedp_mocap/` folder as a reusable JSON file.</li>
+            <li><strong>Face Rig Bind (+ Add Face Bind):</strong> This connects saved Mocap data to a character in your scene. Select your Target Character, select the Mocap file, and adjust the <em>Amp (Amplitude)</em> slider to exaggerate or dampen the facial movements.</li>
+        </ul>
+
+        <h4>⛰️ Environments</h4>
+        <p>Load custom 3D sets, props, or Point Clouds.</p>
+        
+        <div class="image-block">
+            <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/environment_panel.png" alt="Environment Panel" style="max-width: 300px;" onerror="this.outerHTML='<div style=\'color:#888; padding:20px;\'>[ Missing Image: environment_panel.png ]</div>'">
+        </div>
+
+        <ul>
+            <li><strong>+ Add Env:</strong> Creates a new environment container.</li>
+            <li><strong>Model Selection:</strong> Dropdown reads from your `input/yedp_envs` folder. Supports .glb, .gltf, .fbx, .obj, and .ply.</li>
+            <li><strong>Gaussian Splats (.ply):</strong> The Action Director natively supports Gaussian Splat point clouds! When you load a .ply file, it will render its original vertex colors in the <em>Textured</em> pass, and automatically cast dense, accurate shadows and depth-maps using a custom internal shader.</li>
+            <li><strong>Loop (Anim):</strong> If your imported environment contains an animation (like a spinning fan or moving platform), this toggles whether it loops.</li>
+        </ul>
+
+        <h3>5. Baking & Outputs</h3>
+        <p>When your scene is ready, click <strong class="warning">BAKE V9.28</strong> at the top right of the viewport.</p>
+        <p>The engine will lock the UI, compress the canvas, and render your frame count perfectly. Once it finishes uploading to the ComfyUI backend, the node will output 7 individual image batches that you can route into standard nodes:</p>
+        
+        <ul>
+            <li><strong>POSE_BATCH:</strong> Standard OpenPose skeleton colors.</li>
+            <li><strong>DEPTH_BATCH:</strong> Z-Depth map for depth ControlNets.</li>
+            <li><strong>CANNY_BATCH:</strong> A matcap rim-light render optimized for edge detection.</li>
+            <li><strong>NORMAL_BATCH:</strong> World-space Normal map.</li>
+            <li><strong>SHADED_BATCH:</strong> Standard grey diffuse render with shadows.</li>
+            <li><strong>ALPHA_BATCH:</strong> Pure black and white silhouette mask.</li>
+            <li><strong>TEXTURED_BATCH:</strong> Full-color render using original materials and point-cloud vertex colors.</li>
+        </ul>
+
+        <div class="image-block">
+            <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/baking_outputs.png" alt="Baking Outputs" onerror="this.outerHTML='<div style=\'color:#888; padding:20px;\'>[ Missing Image: baking_outputs.png ]</div>'">
+        </div>
+
+        <h3>Folder Structure Reference</h3>
+        <p>To ensure your files appear in the Action Director's dropdown menus, place them in the following directories:</p>
+        
+        <div class="code-block">
+            Rigs:         custom_nodes/ComfyUI-Yedp-Action-Director/web/ <span>(.glb, .fbx)</span><br>
+            Animations:   input/yedp_anims/ <span>(.glb, .fbx, .bvh)</span><br>
+            Environments: input/yedp_envs/ <span>(.glb, .fbx, .obj, .ply)</span><br>
+            Cameras:      input/yedp_cams/ <span>(.glb, .fbx)</span><br>
+            Mocap Data:   input/yedp_mocap/ <span>(.json)</span>
+        </div>
+
+        <div class="image-block">
+            <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/folder_structure.png" alt="Folder Structure" style="max-width: 400px;" onerror="this.outerHTML='<div style=\'color:#888; padding:20px;\'>[ Missing Image: folder_structure.png ]</div>'">
+        </div>
+    </div>
+</body>
+</html>
