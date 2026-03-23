@@ -1,7 +1,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-/** * YEDP ACTION DIRECTOR - V9.28 (Perfected Face Mocap, Offline Video, & Sequencer)
+/** * YEDP ACTION DIRECTOR - V9.29 (Perfected Face Mocap, Offline Video, & Sequencer)
  * - Update: Added Multi-Clip Animation Sequencer! Characters can now queue an infinite sequence of animations.
  * - Update: Auto-Crossfade System. Sequencer automatically calculates 0.5s overlapping weight blends.
  * - Update: Circular Time-Wrapping. Looping a character now mathematically blends the final sequence clip flawlessly back into the first.
