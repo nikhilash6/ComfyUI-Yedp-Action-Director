@@ -14,7 +14,10 @@ import { api } from "/scripts/api.js";
  * - Feature: Added JSON disk-saving and loading for recorded Mocap tracks!
  * - Feature: Continuous Root Motion Tracking! Automatically strips loop snapping and integrates spatial movement indefinitely. 
  * - Feature: Added PLYLoader support for Gaussian Splats / Point Clouds and a new TEXTURED Render pass!
- * - UI Update: Added Integrated Help / Manual Menu overlay loading external HTML file.
+ * - UI Update: Fixed truncated elements and expanded sidebar width to 280px for better breathing room.
+ * - UI Update: Added custom Range Selection Slider for trimming video Face Mocap captures.
+ * - UI Update: Added custom Capture Name input field for Face Mocap bindings.
+ * - UI Update: Added real-time toggle between Point Cloud and Gaussian Splat for PLY environments.
  */
 
 const loadThreeJS = async () => {
@@ -303,9 +306,13 @@ class EnvironmentInstance {
         this.envFile = "none";
         this.meshes = [];
         this.splatViewer = null;
+        this.forceSplat = null; // Toggle property for PLY files
     }
 
     destroy(scene) {
+        if (this.splatViewer && typeof this.splatViewer.dispose === 'function') {
+            this.splatViewer.dispose();
+        }
         scene.remove(this.group);
         this.mixer.stopAllAction();
     }
@@ -360,6 +367,9 @@ class YedpViewport {
         this.mocapMediaStream = null;
         this.mocapOverlay = null;
         this.mocapTimer = null;
+        
+        this.mocapRangeStart = 0; // Video Trim Start (0.0 to 1.0)
+        this.mocapRangeEnd = 1;   // Video Trim End (0.0 to 1.0)
 
         this.selected = { obj: null, type: null, id: null };
 
@@ -530,10 +540,10 @@ class YedpViewport {
             Object.assign(mainCol.style, { display: "flex", flexDirection: "column", flex: "1", minWidth: 0, overflow: "hidden" });
             this.container.appendChild(mainCol);
 
-            // SIDEBAR
+            // SIDEBAR - Increased to 280px to fix cramped inputs
             this.uiSidebar = document.createElement("div");
             Object.assign(this.uiSidebar.style, {
-                width: "240px", flex: "0 0 240px", background: "#1a1a1a", borderLeft: "1px solid #333",
+                width: "280px", flex: "0 0 280px", background: "#1a1a1a", borderLeft: "1px solid #333",
                 display: "flex", flexDirection: "column", overflowY: "auto", padding: "8px", boxSizing: "border-box",
                 gap: "8px", fontSize: "11px", color: "#ccc"
             });
@@ -828,6 +838,8 @@ class YedpViewport {
                 camOverrideOffset: this.camOverrideOffset,
                 camOverrideScale: this.camOverrideScale,
                 isCameraOverride: this.isCameraOverride,
+                defaultNear: this.defaultNear,
+                defaultFar: this.defaultFar,
                 camKeys: {
                     start: this.camKeys.start ? { pos: this.camKeys.start.pos.toArray(), quat: this.camKeys.start.quat.toArray(), zoom: this.camKeys.start.zoom } : null,
                     end: this.camKeys.end ? { pos: this.camKeys.end.pos.toArray(), quat: this.camKeys.end.quat.toArray(), zoom: this.camKeys.end.zoom } : null,
@@ -851,7 +863,7 @@ class YedpViewport {
             })),
             environments: this.environments.map(e => ({
                 pos: e.group.position.toArray(), rot: e.group.rotation.toArray(), scl: e.group.scale.toArray(),
-                loop: e.loop, envFile: e.envFile
+                loop: e.loop, envFile: e.envFile, forceSplat: e.forceSplat !== undefined ? e.forceSplat : null
             })),
             mocap: {
                 recordings: [], 
@@ -894,6 +906,13 @@ class YedpViewport {
             }
 
             if (state.camera) {
+                this.defaultNear = state.camera.defaultNear !== undefined ? state.camera.defaultNear : 0.1;
+                this.defaultFar = state.camera.defaultFar !== undefined ? state.camera.defaultFar : 100.0;
+
+                const valNear = this.container.querySelector("#inp-cam-near-val"); if(valNear) valNear.value = this.defaultNear;
+                const valFar = this.container.querySelector("#inp-cam-far-val"); if(valFar) valFar.value = this.defaultFar;
+                const valMm = this.container.querySelector("#inp-cam-mm-val"); if(valMm) valMm.value = Math.round(this.perspCam.getFocalLength());
+
                 this.isOrthographic = state.camera.isOrtho || false;
                 const chkOrtho = this.container.querySelector("#chk-ortho"); if(chkOrtho) chkOrtho.checked = this.isOrthographic;
                 
@@ -997,6 +1016,7 @@ class YedpViewport {
                     newE.group.rotation.fromArray(eData.rot);
                     newE.group.scale.fromArray(eData.scl);
                     newE.loop = eData.loop !== false;
+                    newE.forceSplat = eData.forceSplat !== undefined ? eData.forceSplat : null;
                     if (eData.envFile && eData.envFile !== "none") await this.loadEnvironmentFile(newE, eData.envFile);
                 }
             }
@@ -1588,65 +1608,121 @@ class YedpViewport {
             const r = document.createElement("div"); r.style.display = "flex"; r.style.gap = "4px"; r.style.alignItems = "center";
             const l = document.createElement("span"); l.innerText = lbl; l.style.width = "20px"; l.style.color = "#888"; r.appendChild(l);
             keys.forEach(k => {
-                const inp = document.createElement("input"); inp.type = "number"; inp.step = "0.1";
-                Object.assign(inp.style, { flex: "1", width: "0", background: "#111", color: "#fff", border: "1px solid #444", fontSize: "10px", padding: "2px" });
-                inp.onchange = () => { this.updateObjectFromTransformUI(); this.forceUpdateFrame(); };
-                inp.addEventListener('keydown', stopEvent); inp.addEventListener('keyup', stopEvent);
-                inp.addEventListener('keypress', stopEvent); inp.addEventListener('mousedown', stopEvent);
-                inp.addEventListener('pointerdown', stopEvent);
-                this.uiTransformInputs[k] = inp; r.appendChild(inp);
-            });
-            return r;
-        };
-        transCol.content.append(tRow("Pos", ['px', 'py', 'pz']), tRow("Rot", ['rx', 'ry', 'rz']), tRow("Scl", ['sx', 'sy', 'sz']));
+            const inp = document.createElement("input"); inp.type = "number"; inp.step = "0.1";
+            Object.assign(inp.style, { flex: "1", width: "0", background: "#111", color: "#fff", border: "1px solid #444", fontSize: "10px", padding: "2px" });
+            inp.onchange = () => { this.updateObjectFromTransformUI(); this.forceUpdateFrame(); };
+            inp.addEventListener('keydown', stopEvent); inp.addEventListener('keyup', stopEvent);
+            inp.addEventListener('keypress', stopEvent); inp.addEventListener('mousedown', stopEvent);
+            inp.addEventListener('pointerdown', stopEvent);
+            this.uiTransformInputs[k] = inp; r.appendChild(inp);
+        });
+        return r;
+    };
+    transCol.content.append(tRow("Pos", ['px', 'py', 'pz']), tRow("Rot", ['rx', 'ry', 'rz']), tRow("Scl", ['sx', 'sy', 'sz']));
 
-        // CAMERA
-        const camCol = createCollapsible(`${iconCamera} Camera`, false);
-        const camSettingsRow = document.createElement("div");
-        Object.assign(camSettingsRow.style, { display: "flex", gap: "6px", alignItems: "center", marginBottom: "4px", flexWrap: "wrap" });
-        const btnSelCam = createBtn("Select Cam", "#334", "#445");
-        btnSelCam.style.flex = "0 0 auto"; btnSelCam.onclick = () => this.selectObject(this.camera, 'camera', 'main');
+    // CAMERA
+    const camCol = createCollapsible(`${iconCamera} Camera`, false);
+    
+    const camSettingsRow = document.createElement("div");
+    Object.assign(camSettingsRow.style, { display: "flex", gap: "6px", alignItems: "center", marginBottom: "6px", justifyContent: "space-between" });
+    const btnSelCam = createBtn("Select Cam", "#334", "#445");
+    btnSelCam.style.flex = "1"; btnSelCam.onclick = () => this.selectObject(this.camera, 'camera', 'main');
 
-        const lblOrtho = document.createElement("label");
-        Object.assign(lblOrtho.style, { cursor: "pointer", display: "flex", gap: "4px", color: "#ccc", fontSize: "10px", alignItems: "center" });
-        const chkOrtho = document.createElement("input"); chkOrtho.type = "checkbox"; chkOrtho.checked = this.isOrthographic;
-        chkOrtho.id = "chk-ortho";
-        lblOrtho.append(chkOrtho, "Ortho");
+    const lblOrtho = document.createElement("label");
+    Object.assign(lblOrtho.style, { cursor: "pointer", display: "flex", gap: "4px", color: "#ccc", fontSize: "10px", alignItems: "center" });
+    const chkOrtho = document.createElement("input"); chkOrtho.type = "checkbox"; chkOrtho.checked = this.isOrthographic;
+    chkOrtho.id = "chk-ortho";
+    lblOrtho.append(chkOrtho, "Ortho");
+    camSettingsRow.append(btnSelCam, lblOrtho);
 
-        const fovContainer = document.createElement("div");
-        Object.assign(fovContainer.style, { display: "flex", gap: "4px", alignItems: "center", flex: "1", transition: "opacity 0.2s", minWidth: "0" });
-        const lblFov = document.createElement("span"); lblFov.innerText = "FOV"; Object.assign(lblFov.style, {fontSize: "10px", color: "#888"});
-        const sldFov = document.createElement("input"); sldFov.type = "range"; sldFov.min = 10; sldFov.max = 120; sldFov.value = this.perspCam.fov; 
-        sldFov.id = "inp-cam-fov-sld";
-        Object.assign(sldFov.style, { flex: "1", width: "0", minWidth: "30px" });
-        const valFov = document.createElement("input"); valFov.type = "number"; valFov.min = 10; valFov.max = 120; valFov.value = this.perspCam.fov; 
-        valFov.id = "inp-cam-fov-val";
-        Object.assign(valFov.style, { fontSize: "10px", color: "#00d2ff", width: "36px", background: "#111", border: "1px solid #444", padding: "1px 2px", borderRadius: "2px", textAlign: "right" });
-        valFov.addEventListener('keydown', stopEvent); valFov.addEventListener('mousedown', stopEvent);
-        
-        fovContainer.append(lblFov, sldFov, valFov);
-        camSettingsRow.append(btnSelCam, lblOrtho, fovContainer);
+    const fovContainer = document.createElement("div");
+    Object.assign(fovContainer.style, { display: "flex", gap: "4px", alignItems: "center", marginBottom: "6px", transition: "opacity 0.2s" });
+    const lblFov = document.createElement("span"); lblFov.innerText = "FOV"; Object.assign(lblFov.style, {fontSize: "9px", color: "#888", width: "22px"});
+    const sldFov = document.createElement("input"); sldFov.type = "range"; sldFov.min = 10; sldFov.max = 120; sldFov.value = this.perspCam.fov; 
+    sldFov.id = "inp-cam-fov-sld";
+    Object.assign(sldFov.style, { flex: "1", width: "0", minWidth: "20px" });
+    
+    const valFov = document.createElement("input"); valFov.type = "number"; valFov.min = 10; valFov.max = 120; valFov.value = this.perspCam.fov; 
+    valFov.id = "inp-cam-fov-val";
+    Object.assign(valFov.style, { fontSize: "9px", color: "#00d2ff", width: "32px", background: "#111", border: "1px solid #444", padding: "2px", borderRadius: "2px", textAlign: "right" });
+    const degSym = document.createElement("span"); degSym.innerText = "°"; degSym.style.fontSize = "9px"; degSym.style.color = "#888";
+    
+    const valMm = document.createElement("input"); valMm.type = "number"; valMm.value = Math.round(this.perspCam.getFocalLength());
+    valMm.id = "inp-cam-mm-val";
+    Object.assign(valMm.style, { fontSize: "9px", color: "#4ade80", width: "36px", background: "#111", border: "1px solid #444", padding: "2px", borderRadius: "2px", textAlign: "right", marginLeft: "2px" });
+    const mmSym = document.createElement("span"); mmSym.innerText = "mm"; mmSym.style.fontSize = "9px"; mmSym.style.color = "#888";
 
-        chkOrtho.onchange = (e) => {
-            this.isOrthographic = e.target.checked;
-            fovContainer.style.opacity = this.isOrthographic ? "0.3" : "1.0";
-            sldFov.disabled = this.isOrthographic; valFov.disabled = this.isOrthographic;
+    valFov.addEventListener('keydown', stopEvent); valFov.addEventListener('mousedown', stopEvent);
+    valMm.addEventListener('keydown', stopEvent); valMm.addEventListener('mousedown', stopEvent);
+    
+    const syncFov = (val, isMm = false) => {
+        let fovDeg;
+        if (isMm) {
+            const mm = Math.max(1, parseFloat(val) || 35);
+            this.perspCam.setFocalLength(mm);
+            fovDeg = this.perspCam.fov;
+        } else {
+            fovDeg = Math.max(10, Math.min(120, parseFloat(val) || 45));
+            this.perspCam.fov = fovDeg;
+        }
+        this.perspCam.updateProjectionMatrix();
+        sldFov.value = fovDeg;
+        valFov.value = Math.round(fovDeg * 10) / 10;
+        valMm.value = Math.round(this.perspCam.getFocalLength());
+        this.forceUpdateFrame();
+    };
 
-            const oldCam = this.isOrthographic ? this.perspCam : this.orthoCam;
-            this.camera = this.isOrthographic ? this.orthoCam : this.perspCam;
-            this.camera.position.copy(oldCam.position); this.camera.quaternion.copy(oldCam.quaternion); this.camera.zoom = oldCam.zoom;
+    sldFov.oninput = (e) => syncFov(e.target.value);
+    valFov.onchange = (e) => syncFov(e.target.value);
+    valMm.onchange = (e) => syncFov(e.target.value, true);
 
-            this.controls.object = this.camera;
-            if (this.selected.type !== 'camera') this.transformControls.camera = this.camera;
-            if (this.selected.type === 'camera') this.selectObject(this.camera, 'camera', 'main');
-            const vpArea = this.container.querySelector(".yedp-vp-area");
-            if (vpArea) this.onResize(vpArea); 
+    fovContainer.append(lblFov, sldFov, valFov, degSym, valMm, mmSym);
+
+    const clipContainer = document.createElement("div");
+    Object.assign(clipContainer.style, { display: "flex", gap: "2px", alignItems: "center", marginBottom: "6px" });
+    const lblClip = document.createElement("span"); lblClip.innerText = "Clip"; Object.assign(lblClip.style, {fontSize: "9px", color: "#888", width: "22px"});
+    const lblNear = document.createElement("span"); lblNear.innerText = "N:"; Object.assign(lblNear.style, {fontSize: "9px", color: "#666"});
+    const valNear = document.createElement("input"); valNear.type = "number"; valNear.step = "0.1"; valNear.value = this.defaultNear;
+    valNear.id = "inp-cam-near-val";
+    Object.assign(valNear.style, { flex: "1", width: "0", fontSize: "9px", color: "#fff", background: "#111", border: "1px solid #444", padding: "2px", borderRadius: "2px" });
+    const lblFar = document.createElement("span"); lblFar.innerText = "F:"; Object.assign(lblFar.style, {fontSize: "9px", color: "#666", marginLeft: "2px"});
+    const valFar = document.createElement("input"); valFar.type = "number"; valFar.step = "10"; valFar.value = this.defaultFar;
+    valFar.id = "inp-cam-far-val";
+    Object.assign(valFar.style, { flex: "1", width: "0", fontSize: "9px", color: "#fff", background: "#111", border: "1px solid #444", padding: "2px", borderRadius: "2px" });
+
+    valNear.addEventListener('keydown', stopEvent); valNear.addEventListener('mousedown', stopEvent);
+    valFar.addEventListener('keydown', stopEvent); valFar.addEventListener('mousedown', stopEvent);
+
+    const syncClip = () => {
+        this.defaultNear = parseFloat(valNear.value) || 0.1;
+        this.defaultFar = parseFloat(valFar.value) || 100.0;
+        if (!this.isDepthMode) {
+            this.resetCamera();
             this.forceUpdateFrame();
-        };
-        sldFov.oninput = (e) => { valFov.value = e.target.value; this.perspCam.fov = parseFloat(e.target.value); this.perspCam.updateProjectionMatrix(); this.forceUpdateFrame(); };
-        valFov.oninput = (e) => { sldFov.value = e.target.value; this.perspCam.fov = parseFloat(e.target.value); this.perspCam.updateProjectionMatrix(); this.forceUpdateFrame(); };
+        }
+    };
+    valNear.onchange = syncClip;
+    valFar.onchange = syncClip;
+    clipContainer.append(lblClip, lblNear, valNear, lblFar, valFar);
 
-        const camRow1 = document.createElement("div"); camRow1.style.display = "flex"; camRow1.style.gap = "4px"; camRow1.style.marginBottom = "4px";
+    chkOrtho.onchange = (e) => {
+        this.isOrthographic = e.target.checked;
+        fovContainer.style.opacity = this.isOrthographic ? "0.3" : "1.0";
+        sldFov.disabled = this.isOrthographic; valFov.disabled = this.isOrthographic; valMm.disabled = this.isOrthographic;
+
+        const oldCam = this.isOrthographic ? this.perspCam : this.orthoCam;
+        this.camera = this.isOrthographic ? this.orthoCam : this.perspCam;
+        this.camera.position.copy(oldCam.position); this.camera.quaternion.copy(oldCam.quaternion); this.camera.zoom = oldCam.zoom;
+
+        this.controls.object = this.camera;
+        if (this.selected.type !== 'camera') this.transformControls.camera = this.camera;
+        if (this.selected.type === 'camera') this.selectObject(this.camera, 'camera', 'main');
+        const vpArea = this.container.querySelector(".yedp-vp-area");
+        if (vpArea) this.onResize(vpArea); 
+        this.forceUpdateFrame();
+    };
+
+    const camRow1 = document.createElement("div"); camRow1.style.display = "flex"; camRow1.style.gap = "4px"; camRow1.style.marginBottom = "4px";
         const btnSetStart = createBtn("Set Start"); const btnSetEnd = createBtn("Set End");
         btnSetStart.onclick = () => {
             this.camKeys.start = { pos: this.camera.position.clone(), quat: this.camera.quaternion.clone(), target: this.controls.target.clone(), zoom: this.camera.zoom };
@@ -1674,7 +1750,7 @@ class YedpViewport {
         Object.assign(camImportRow.style, { display: "flex", gap: "4px", alignItems: "center", marginTop: "8px", borderTop: "1px solid #333", paddingTop: "8px" });
         
         const lblOverride = document.createElement("label");
-        Object.assign(lblOverride.style, { cursor: "pointer", display: "flex", gap: "2px", color: "#ccc", fontSize: "10px", alignItems: "center" });
+        Object.assign(lblOverride.style, { cursor: "pointer", display: "flex", gap: "2px", color: "#ccc", fontSize: "10px", alignItems: "center", whiteSpace: "nowrap" });
         const chkOverride = document.createElement("input"); 
         chkOverride.type = "checkbox"; 
         chkOverride.id = "cam-override-chk";
@@ -1713,15 +1789,15 @@ class YedpViewport {
         const rxWrap = makeFixRow("Rx", "0", (e) => { this.camOverrideOffset.rx = parseFloat(e.target.value)||0; this.forceUpdateFrame(); }, "inp-cam-rx");
         const ryWrap = makeFixRow("Ry", "0", (e) => { this.camOverrideOffset.ry = parseFloat(e.target.value)||0; this.forceUpdateFrame(); }, "inp-cam-ry");
         const rzWrap = makeFixRow("Rz", "0", (e) => { this.camOverrideOffset.rz = parseFloat(e.target.value)||0; this.forceUpdateFrame(); }, "inp-cam-rz");
-        const scWrap = makeFixRow("Scl", "1.0", (e) => { this.camOverrideScale = parseFloat(e.target.value)||1.0; this.cameraAnimGroup.scale.setScalar(this.camOverrideScale); this.cameraAnimGroup.updateMatrixWorld(true); this.forceUpdateFrame(); }, "inp-cam-scl");
-        scWrap.querySelector('input').step = "0.01";
+    const scWrap = makeFixRow("Scl", "1.0", (e) => { this.camOverrideScale = parseFloat(e.target.value)||1.0; this.cameraAnimGroup.scale.setScalar(this.camOverrideScale); this.cameraAnimGroup.updateMatrixWorld(true); this.forceUpdateFrame(); }, "inp-cam-scl");
+    scWrap.querySelector('input').step = "0.01";
 
-        camImportFixRow.append(rxWrap, ryWrap, rzWrap, scWrap);
+    camImportFixRow.append(rxWrap, ryWrap, rzWrap, scWrap);
 
-        camCol.content.append(camSettingsRow, camRow1, camRow2, camImportRow, camImportFixRow);
+    camCol.content.append(camSettingsRow, fovContainer, clipContainer, camRow1, camRow2, camImportRow, camImportFixRow);
 
-        // LIGHTING
-        const lightCol = createCollapsible(`${iconLighting} Lighting`, false);
+    // LIGHTING
+    const lightCol = createCollapsible(`${iconLighting} Lighting`, false);
         const btnAddLight = createBtn("+ Add Light", "#542", "#653");
         btnAddLight.style.flex = "none"; btnAddLight.style.padding = "2px 6px"; btnAddLight.style.fontSize = "9px";
         btnAddLight.onclick = (e) => { e.stopPropagation(); this.addLight(); };
@@ -1784,23 +1860,113 @@ class YedpViewport {
 
         mocapCtrlRow1.append(selSource, fileIn, btnAction, btnStop, btnRec);
 
+        // --- IMPROVED VIDEO MOCAP RANGE SELECTION UI ---
         const mocapCtrlRow2 = document.createElement("div");
-        mocapCtrlRow2.style.display = "none"; mocapCtrlRow2.style.gap = "4px"; mocapCtrlRow2.style.marginBottom = "4px";
-        mocapCtrlRow2.style.alignItems = "center";
+        mocapCtrlRow2.style.display = "none"; mocapCtrlRow2.style.flexDirection = "column"; mocapCtrlRow2.style.gap = "4px"; mocapCtrlRow2.style.marginBottom = "4px";
         
+        const playRow = document.createElement("div");
+        playRow.style.display = "flex"; playRow.style.alignItems = "center"; playRow.style.gap = "4px";
+
         const btnPlayPause = createBtn("⏸", "#333", "#555");
         btnPlayPause.style.flex = "none"; btnPlayPause.style.width = "30px"; btnPlayPause.style.padding = "2px";
+        
         const vidTimeline = document.createElement("input");
         vidTimeline.type = "range"; vidTimeline.min = 0; vidTimeline.max = 100; vidTimeline.value = 0;
         vidTimeline.style.flex = "1";
         
-        mocapCtrlRow2.append(btnPlayPause, vidTimeline);
+        playRow.append(btnPlayPause, vidTimeline);
+
+        // Custom Range Slider wrapper
+        const rangeWrapper = document.createElement("div");
+        Object.assign(rangeWrapper.style, { display: "flex", flexDirection: "column", width: "100%", gap: "2px", marginTop: "2px", touchAction: "none" });
+        
+        const timeLabels = document.createElement("div");
+        Object.assign(timeLabels.style, { display: "flex", justifyContent: "space-between", fontSize: "9px", color: "#00d2ff", fontFamily: "monospace", padding: "0 2px" });
+        const lblStart = document.createElement("span"); lblStart.innerText = "00:00.00";
+        const lblEnd = document.createElement("span"); lblEnd.innerText = "00:00.00";
+        timeLabels.append(lblStart, lblEnd);
+
+        const dualSliderContainer = document.createElement("div");
+        Object.assign(dualSliderContainer.style, { position: "relative", height: "12px", background: "#222", borderRadius: "2px", border: "1px solid #444", cursor: "pointer", margin: "0 4px" });
+        
+        const trackHighlight = document.createElement("div");
+        Object.assign(trackHighlight.style, { position: "absolute", top: "0", bottom: "0", background: "#00d2ff", opacity: "0.5", left: "0%", width: "100%", pointerEvents: "none" });
+        
+        const handleStart = document.createElement("div");
+        Object.assign(handleStart.style, { position: "absolute", top: "-4px", bottom: "-4px", width: "8px", background: "#fff", cursor: "ew-resize", left: "0%", transform: "translateX(-50%)", zIndex: 10, borderRadius: "2px", border: "1px solid #000" });
+        
+        const handleEnd = document.createElement("div");
+        Object.assign(handleEnd.style, { position: "absolute", top: "-4px", bottom: "-4px", width: "8px", background: "#fff", cursor: "ew-resize", left: "100%", transform: "translateX(-50%)", zIndex: 10, borderRadius: "2px", border: "1px solid #000" });
+
+        dualSliderContainer.append(trackHighlight, handleStart, handleEnd);
+        rangeWrapper.append(dualSliderContainer, timeLabels);
+
+        mocapCtrlRow2.append(playRow, rangeWrapper);
+        
+        // Setup robust drag logic utilizing pointer capture to prevent memory leaks and glitching
+        const formatTime = (sec) => {
+            if (isNaN(sec)) return "00:00.00";
+            const m = Math.floor(sec / 60);
+            const s = Math.floor(sec % 60);
+            const ms = Math.floor((sec % 1) * 100);
+            return `${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}.${ms.toString().padStart(2,'0')}`;
+        };
+
+        const updateRangeHandles = () => {
+            handleStart.style.left = `${this.mocapRangeStart * 100}%`;
+            handleEnd.style.left = `${this.mocapRangeEnd * 100}%`;
+            trackHighlight.style.left = `${this.mocapRangeStart * 100}%`;
+            trackHighlight.style.width = `${(this.mocapRangeEnd - this.mocapRangeStart) * 100}%`;
+            
+            if (this.mocapVideoEl && this.mocapVideoEl.duration) {
+                lblStart.innerText = formatTime(this.mocapRangeStart * this.mocapVideoEl.duration);
+                lblEnd.innerText = formatTime(this.mocapRangeEnd * this.mocapVideoEl.duration);
+            }
+        };
+
+        let isDraggingStart = false; let isDraggingEnd = false;
+        const getValFromEvent = (e) => {
+            const rect = dualSliderContainer.getBoundingClientRect();
+            let x = e.clientX - rect.left;
+            return Math.max(0, Math.min(1, x / rect.width));
+        };
+
+        const onPointerMove = (e) => {
+            if (!isDraggingStart && !isDraggingEnd) return;
+            const val = getValFromEvent(e);
+            if (isDraggingStart) {
+                this.mocapRangeStart = Math.min(val, this.mocapRangeEnd - 0.02); // 2% minimum gap
+                if (this.mocapVideoEl && this.mocapVideoEl.duration) this.mocapVideoEl.currentTime = this.mocapRangeStart * this.mocapVideoEl.duration;
+            } else if (isDraggingEnd) {
+                this.mocapRangeEnd = Math.max(val, this.mocapRangeStart + 0.02);
+                if (this.mocapVideoEl && this.mocapVideoEl.duration) this.mocapVideoEl.currentTime = this.mocapRangeEnd * this.mocapVideoEl.duration;
+            }
+            updateRangeHandles();
+        };
+
+        const onPointerUp = (e) => {
+            if (isDraggingStart) { isDraggingStart = false; handleStart.releasePointerCapture(e.pointerId); }
+            if (isDraggingEnd) { isDraggingEnd = false; handleEnd.releasePointerCapture(e.pointerId); }
+        };
+
+        handleStart.onpointerdown = (e) => { isDraggingStart = true; handleStart.setPointerCapture(e.pointerId); e.stopPropagation(); };
+        handleEnd.onpointerdown = (e) => { isDraggingEnd = true; handleEnd.setPointerCapture(e.pointerId); e.stopPropagation(); };
+
+        handleStart.onpointermove = onPointerMove;
+        handleEnd.onpointermove = onPointerMove;
+        dualSliderContainer.onpointermove = onPointerMove; 
+
+        handleStart.onpointerup = onPointerUp;
+        handleEnd.onpointerup = onPointerUp;
+        dualSliderContainer.onpointerup = onPointerUp;
+        // --- END RANGE SELECTION UI ---
 
         selSource.onchange = () => {
             if (selSource.value === "video") {
                 btnAction.innerText = "📂 Load";
                 mocapCtrlRow2.style.display = "flex";
                 this.mocapVideoEl.style.transform = "none"; 
+                updateRangeHandles(); // Refresh UI layout
             } else {
                 btnAction.innerText = "📷 Start";
                 mocapCtrlRow2.style.display = "none";
@@ -1841,6 +2007,7 @@ class YedpViewport {
                 this.mocapVideoEl.play(); this.isMocapActive = true;
                 btnRec.disabled = false; btnRec.style.opacity = "1.0";
                 btnPlayPause.innerText = "⏸";
+                updateRangeHandles();
                 this.mocapLoop(); 
             }
         };
@@ -1876,6 +2043,10 @@ class YedpViewport {
         btnRec.onclick = () => {
             if (!this.isMocapActive && selSource.value !== "video") return;
             
+            // Capture name extraction
+            const nameInput = this.container.querySelector("#mocap-name-input");
+            const customName = nameInput && nameInput.value.trim() !== "" ? nameInput.value.trim() : `Capture ${this.recordedMocaps.length + 1}`;
+            
             if (!this.isMocapRecording) {
                 if (selSource.value === "video") {
                     this.isMocapRecording = true;
@@ -1887,14 +2058,17 @@ class YedpViewport {
                     
                     this.currentMocapSession = {
                         id: `mocap_${Date.now()}`,
-                        name: `Capture ${this.recordedMocaps.length + 1}`,
+                        name: customName,
                         frames: [], duration: 0, fps: 30
                     };
                     
                     const duration = this.mocapVideoEl.duration;
                     const FPS = 30;
                     const step = 1/FPS;
-                    let currentTime = 0;
+                    
+                    // Constrain processing to the user-selected slider range
+                    let currentTime = this.mocapRangeStart * duration;
+                    const targetEndTime = this.mocapRangeEnd * duration;
                     
                     const w = this.mocapVideoEl.videoWidth || 640;
                     const h = this.mocapVideoEl.videoHeight || 480;
@@ -1905,13 +2079,17 @@ class YedpViewport {
                     let monotonicTime = performance.now();
 
                     const processFrame = async () => {
-                        if (currentTime >= duration) {
+                        // Stop processing if we exceed the dragged range handle or file duration
+                        if (currentTime > targetEndTime || currentTime >= duration) {
                             this.currentMocapSession.duration = this.currentMocapSession.frames.length / FPS;
                             this.recordedMocaps.push(this.currentMocapSession);
                             this.syncMocapDropdowns();
                             this.saveMocapToServer(this.currentMocapSession); 
                             this.debugMocapText.innerText = `Saved (${this.currentMocapSession.frames.length}f)`;
                             
+                            // Clear input visually for next capture
+                            if (nameInput) nameInput.value = "";
+
                             this.isMocapRecording = false;
                             this.currentMocapSession = null;
                             btnRec.disabled = false;
@@ -1957,7 +2135,10 @@ class YedpViewport {
                             }
                         } catch(e) {}
                         
-                        this.debugMocapText.innerText = `Processing: ${Math.round((currentTime/duration)*100)}%`;
+                        const rangeSpan = targetEndTime - (this.mocapRangeStart * duration);
+                        const progress = rangeSpan > 0 ? ((currentTime - (this.mocapRangeStart * duration)) / rangeSpan) * 100 : 100;
+                        
+                        this.debugMocapText.innerText = `Processing: ${Math.round(progress)}%`;
                         vidTimeline.value = (currentTime/duration)*100;
                         
                         currentTime += step;
@@ -1992,7 +2173,7 @@ class YedpViewport {
                             btnRec.style.background = "#811";
                             this.currentMocapSession = {
                                 id: `mocap_${Date.now()}`,
-                                name: `Capture ${this.recordedMocaps.length + 1}`,
+                                name: customName,
                                 frames: [], duration: 0, fps: 30, startTime: performance.now()
                             };
                             this.debugMocapText.innerText = "🔴 RECORDING...";
@@ -2012,6 +2193,9 @@ class YedpViewport {
                     this.syncMocapDropdowns();
                     this.saveMocapToServer(this.currentMocapSession); 
                     this.debugMocapText.innerText = `Saved (${this.currentMocapSession.frames.length}f)`;
+                    
+                    // Clear input visually for next capture
+                    if (nameInput) nameInput.value = "";
                 } else {
                     this.debugMocapText.innerText = "Empty capture discarded.";
                 }
@@ -2019,15 +2203,26 @@ class YedpViewport {
             }
         }
 
+        // --- CUSTOM CAPTURE NAME FIELD ---
+        const nameInputRow = document.createElement("div");
+        nameInputRow.style.display = "flex"; nameInputRow.style.gap = "4px"; nameInputRow.style.marginTop = "8px";
+        const mocapNameInput = document.createElement("input");
+        mocapNameInput.type = "text";
+        mocapNameInput.placeholder = "Enter Capture Name...";
+        mocapNameInput.id = "mocap-name-input";
+        Object.assign(mocapNameInput.style, { flex: "1", background: "#111", color: "#00d2ff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "4px" });
+        mocapNameInput.addEventListener('keydown', e => e.stopPropagation()); // stop hotkeys from triggering
+        nameInputRow.appendChild(mocapNameInput);
+
         const btnAddMocapBinding = createBtn("+ Add Face Bind", "#255", "#377");
         btnAddMocapBinding.style.flex = "none"; btnAddMocapBinding.style.padding = "2px 6px"; btnAddMocapBinding.style.fontSize = "9px";
-        btnAddMocapBinding.style.marginTop = "8px";
+        btnAddMocapBinding.style.marginTop = "4px";
         btnAddMocapBinding.onclick = (e) => { e.stopPropagation(); this.addMocapBinding(); };
         
         this.uiMocapList = document.createElement("div");
         this.uiMocapList.style.display = "flex"; this.uiMocapList.style.flexDirection = "column"; this.uiMocapList.style.gap = "6px";
 
-        mocapCol.content.append(mocapPrevWrapper, mocapCtrlRow1, mocapCtrlRow2, btnAddMocapBinding, this.uiMocapList);
+        mocapCol.content.append(mocapPrevWrapper, mocapCtrlRow1, mocapCtrlRow2, nameInputRow, btnAddMocapBinding, this.uiMocapList);
 
         // ENVIRONMENTS
         const envCol = createCollapsible(`${iconEnv} Environments`, true);
@@ -2284,7 +2479,7 @@ class YedpViewport {
             
             const inp = document.createElement("input"); 
             inp.type="number"; inp.step="0.05"; inp.value = currentAmp; 
-            Object.assign(inp.style, { width:"30px", background:"#111", color:"#00d2ff", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right" }); 
+            Object.assign(inp.style, { width:"36px", background:"#111", color:"#00d2ff", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right" }); 
             
             const syncUI = (v) => { 
                 b.amplitude = v; sld.value = v; inp.value = v; 
@@ -2298,7 +2493,7 @@ class YedpViewport {
             inp.addEventListener('keypress', stopEvent); inp.addEventListener('pointerdown', stopEvent);
             inp.addEventListener('mousedown', stopEvent);
 
-            const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px"; lblLoop.style.fontSize = "9px"; lblLoop.style.color = "#ccc";
+            const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px"; lblLoop.style.fontSize = "9px"; lblLoop.style.color = "#ccc"; lblLoop.style.whiteSpace = "nowrap";
             const chkLoop = document.createElement("input"); chkLoop.type = "checkbox"; chkLoop.checked = b.loop !== false;
             chkLoop.onchange = (e) => { b.loop = e.target.checked; this.forceUpdateFrame(); };
             lblLoop.append(chkLoop, "Loop");
@@ -2622,11 +2817,15 @@ class YedpViewport {
         if(info) info.innerText = `[Loading...]`;
 
         if(!filename || filename === "none") {
+            if (envObj.splatViewer && typeof envObj.splatViewer.dispose === 'function') {
+                envObj.splatViewer.dispose();
+            }
             envObj.group.clear();
             envObj.meshes = [];
             envObj.splatViewer = null;
             envObj.mixer.stopAllAction();
             envObj.action = null;
+            envObj.forceSplat = null;
             if(info) info.innerText = `[Meshes: 0]`;
             this.forceUpdateFrame();
             return;
@@ -2634,7 +2833,21 @@ class YedpViewport {
         envObj.envFile = filename;
         const isFBX = filename.toLowerCase().endsWith(".fbx");
         const isPLY = filename.toLowerCase().endsWith(".ply");
-        const isSPLAT = filename.toLowerCase().endsWith(".splat") || filename.toLowerCase().endsWith(".ksplat") || filename.toLowerCase().endsWith(".spz") || filename.toLowerCase().endsWith(".sog") || (isPLY && filename.toLowerCase().includes("splat"));
+        
+        // Custom toggle logic allowing dynamic switching for PLY point clouds vs splats
+        let isSPLAT = filename.toLowerCase().endsWith(".splat") || filename.toLowerCase().endsWith(".ksplat") || filename.toLowerCase().endsWith(".spz") || filename.toLowerCase().endsWith(".sog");
+        
+        if (isPLY) {
+            if (envObj.forceSplat !== undefined && envObj.forceSplat !== null) {
+                isSPLAT = envObj.forceSplat;
+            } else {
+                isSPLAT = filename.toLowerCase().includes("splat");
+                envObj.forceSplat = isSPLAT;
+            }
+        } else {
+            envObj.forceSplat = null;
+        }
+
         const ext = filename.split('.').pop().toLowerCase();
         const url = `/view?filename=${filename}&type=input&subfolder=yedp_envs&t=${Date.now()}#.${ext}`;
         try {
@@ -2679,6 +2892,10 @@ class YedpViewport {
                 targetObj = model.scene;
             }
             
+            // Critical cleanup to prevent WebGL GPU Leaks when toggling files
+            if (envObj.splatViewer && typeof envObj.splatViewer.dispose === 'function') {
+                envObj.splatViewer.dispose();
+            }
             envObj.group.clear();
             envObj.meshes = [];
             envObj.splatViewer = null; // Clear old reference
@@ -2776,6 +2993,29 @@ class YedpViewport {
             this.availableEnvs.forEach(env => selEnv.add(new Option(env, env)));
             selEnv.value = e.envFile;
             selEnv.onchange = (evt) => this.loadEnvironmentFile(e, evt.target.value);
+            
+            card.append(head, meshInfo, selEnv);
+
+            // Dynamically inject Splat Toggle UI for PLY pointclouds
+            if (e.envFile && e.envFile.toLowerCase().endsWith(".ply")) {
+                const splatRow = document.createElement("div");
+                splatRow.style.display = "flex"; splatRow.style.alignItems = "center"; splatRow.style.gap = "4px"; splatRow.style.marginBottom = "4px";
+                
+                const lblSplat = document.createElement("label");
+                Object.assign(lblSplat.style, { cursor: "pointer", display: "flex", gap: "4px", fontSize: "10px", color: "#00d2ff" });
+                
+                const chkSplat = document.createElement("input");
+                chkSplat.type = "checkbox";
+                chkSplat.checked = e.forceSplat === true;
+                chkSplat.onchange = (evt) => {
+                    e.forceSplat = evt.target.checked;
+                    this.loadEnvironmentFile(e, e.envFile);
+                };
+                
+                lblSplat.append(chkSplat, "Render as Gaussian Splat");
+                splatRow.appendChild(lblSplat);
+                card.appendChild(splatRow);
+            }
 
             const foot = document.createElement("div"); foot.style.display = "flex"; foot.style.justifyContent = "space-between"; foot.style.alignItems = "center";
             const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px";
@@ -2792,7 +3032,7 @@ class YedpViewport {
             lblDur.id = `env-dur-${e.id}`; lblDur.style.color = "#888"; lblDur.style.fontFamily = "monospace";
             
             foot.append(lblLoop, lblDur);
-            card.append(head, meshInfo, selEnv, foot);
+            card.append(foot);
             this.uiEnvList.appendChild(card);
         });
         this.refreshSidebarHighlights();
@@ -2892,7 +3132,7 @@ class YedpViewport {
             
             const bLbl = document.createElement("span"); bLbl.innerText = "Blend (s)"; bLbl.style.fontSize="9px"; bLbl.style.color="#888"; bLbl.style.width="40px";
             const bSld = document.createElement("input"); bSld.type = "range"; bSld.min = "0.0"; bSld.max = "2.0"; bSld.step = "0.1"; bSld.value = c.blendDuration; Object.assign(bSld.style, { flex: "1", width: "0" });
-            const bInp = document.createElement("input"); bInp.type = "number"; bInp.step = "0.1"; bInp.value = c.blendDuration; Object.assign(bInp.style, {width:"30px", background:"#111", color:"#00d2ff", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right"});
+            const bInp = document.createElement("input"); bInp.type = "number"; bInp.step = "0.1"; bInp.value = c.blendDuration; Object.assign(bInp.style, {width:"36px", background:"#111", color:"#00d2ff", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right"});
             
             const syncBlend = (v) => {
                 c.blendDuration = v; bSld.value = v; bInp.value = v;
@@ -2917,7 +3157,7 @@ class YedpViewport {
             
             const fsLbl = document.createElement("span"); fsLbl.innerText = "Pt Size"; fsLbl.style.fontSize="9px"; fsLbl.style.color="#888"; fsLbl.style.width="35px";
             const fsSld = document.createElement("input"); fsSld.type = "range"; fsSld.min = "0.1"; fsSld.max = "3.0"; fsSld.step = "0.1"; fsSld.value = c.faceScale; Object.assign(fsSld.style, { flex: "1", width: "0" });
-            const fsInp = document.createElement("input"); fsInp.type = "number"; fsInp.step = "0.1"; fsInp.value = c.faceScale; Object.assign(fsInp.style, {width:"30px", background:"#111", color:"#00d2ff", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right"});
+            const fsInp = document.createElement("input"); fsInp.type = "number"; fsInp.step = "0.1"; fsInp.value = c.faceScale; Object.assign(fsInp.style, {width:"36px", background:"#111", color:"#00d2ff", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right"});
             
             const syncFs = (v) => {
                 c.faceScale = v; fsSld.value = v; fsInp.value = v;
@@ -2931,18 +3171,18 @@ class YedpViewport {
             faceScaleRow.append(fsLbl, fsSld, fsInp);
 
             const foot = document.createElement("div"); foot.style.display = "flex"; foot.style.justifyContent = "space-between"; foot.style.alignItems = "center";
-            const loopBox = document.createElement("div"); loopBox.style.display = "flex"; loopBox.style.alignItems = "center"; loopBox.style.gap = "6px";
+            const loopBox = document.createElement("div"); loopBox.style.display = "flex"; loopBox.style.alignItems = "center"; loopBox.style.gap = "6px"; loopBox.style.flexWrap = "wrap";
             
             const btnGender = document.createElement("button"); btnGender.innerText = c.gender;
             Object.assign(btnGender.style, { background: "#111", border: "1px solid #444", borderRadius: "3px", cursor: "pointer", fontSize: "10px", padding: "1px 6px", fontWeight: "bold", color: c.gender === 'F' ? '#ff66b2' : '#66b2ff' });
             btnGender.onclick = () => { c.gender = c.gender === 'M' ? 'F' : 'M'; btnGender.innerText = c.gender; btnGender.style.color = c.gender === 'F' ? '#ff66b2' : '#66b2ff'; this.updateVisibilities(); this.forceUpdateFrame(); };
 
-            const lblFace = document.createElement("label"); lblFace.style.cursor = "pointer"; lblFace.style.display = "flex"; lblFace.style.gap = "2px"; lblFace.style.fontSize = "10px";
+            const lblFace = document.createElement("label"); lblFace.style.cursor = "pointer"; lblFace.style.display = "flex"; lblFace.style.gap = "2px"; lblFace.style.fontSize = "10px"; lblFace.style.whiteSpace = "nowrap";
             const chkFace = document.createElement("input"); chkFace.type = "checkbox"; chkFace.checked = c.showFace;
             chkFace.onchange = (e) => { c.showFace = e.target.checked; this.updateVisibilities(); this.forceUpdateFrame(); };
             lblFace.append(chkFace, "Face");
 
-            const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px"; lblLoop.style.fontSize = "10px";
+            const lblLoop = document.createElement("label"); lblLoop.style.cursor = "pointer"; lblLoop.style.display = "flex"; lblLoop.style.gap = "2px"; lblLoop.style.fontSize = "10px"; lblLoop.style.whiteSpace = "nowrap";
             const chkLoop = document.createElement("input"); chkLoop.type = "checkbox"; chkLoop.checked = c.loop;
             chkLoop.onchange = (e) => { 
                 c.loop = e.target.checked; 
@@ -2956,7 +3196,7 @@ class YedpViewport {
             };
             lblLoop.append(chkLoop, "Loop"); 
             
-            const lblRoot = document.createElement("label"); lblRoot.style.cursor = "pointer"; lblRoot.style.display = "flex"; lblRoot.style.gap = "2px"; lblRoot.style.fontSize = "10px";
+            const lblRoot = document.createElement("label"); lblRoot.style.cursor = "pointer"; lblRoot.style.display = "flex"; lblRoot.style.gap = "2px"; lblRoot.style.fontSize = "10px"; lblRoot.style.whiteSpace = "nowrap";
             const chkRoot = document.createElement("input"); chkRoot.type = "checkbox"; chkRoot.checked = c.useRootMotion;
             chkRoot.onchange = (e) => { 
                 c.useRootMotion = e.target.checked; 
@@ -3357,7 +3597,7 @@ class YedpViewport {
             });
             // NEW LOGIC: Hide Splats if in Depth or Shaded mode, as they don't support those materials natively
             if (e.splatViewer) {
-                e.splatViewer.visible = !isDepth && !isShaded;
+                e.splatViewer.visible = (isTextured);
             }
         });
 
@@ -3612,34 +3852,38 @@ class YedpViewport {
         const vpAreaRestore = this.container.querySelector(".yedp-vp-area");
         if (vpAreaRestore) this.onResize(vpAreaRestore);
         
-        if(this.isDepthMode) { this.camera.near = this.userNear; this.camera.far = this.userFar; } 
-        else this.resetCamera();
-        this.camera.updateProjectionMatrix();
+        if(this.isDepthMode) { this.updateCameraBounds(); } else { this.resetCamera(); }
+        
+        toggleHelpers(true); // <--- FIX: Always bring the grid and floor back!
+        
+        btn.innerText = originalBtnText;
 
-        toggleHelpers(true); this.scene.background = originalBg; 
-        
-        this.lights.forEach(l => l.helper.visible = l.type !== 'ambient');
-        if (this.selected.obj) this.selectObject(this.selected.obj, this.selected.type, this.selected.id);
-        
-        this.updateVisibilities();
-        this.characters.forEach(c => { c.skeletonHelper.visible = visSkel; });
-        
-        btn.innerText = "UPLOADING...";
-        const clientDataWidget = this.node.widgets.find(w => w.name === "client_data");
-        if (clientDataWidget) {
-            try {
-                const response = await api.fetchApi("/yedp/upload_payload", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(results) });
-                if (!response.ok) throw new Error("Upload failed");
-                const resData = await response.json();
-                clientDataWidget.value = resData.payload_id;
-            } catch (err) {
-                console.error("[Yedp] Memory cache upload failed, falling back to local string:", err);
-                clientDataWidget.value = JSON.stringify(results);
+        await this.sendBakeToServer(results);
+    }
+
+    async sendBakeToServer(results) {
+        const btn = this.container.querySelector("#btn-bake");
+        if (btn) btn.innerText = "SENDING...";
+
+        try {
+            const res = await api.fetchApi("/yedp/upload_payload", {
+                method: "POST",
+                body: JSON.stringify(results) // Reverted back to raw results so Python nodes.py can parse data.get("pose")
+            });
+            const data = await res.json();
+            if (data.payload_id) {
+                // Reverted the widget target back to "client_data" as defined in nodes.py
+                const widget = this.node.widgets.find(w => w.name === "client_data");
+                if (widget) {
+                    widget.value = data.payload_id;
+                }
             }
+        } catch (e) {
+            console.error("[Yedp] Failed to send bake to server", e);
+            alert("Bake upload failed. See console.");
+        } finally {
+            if (btn) btn.innerText = "BAKE V9.28";
         }
-        
-        btn.innerText = "BAKE (DONE)";
-        setTimeout(() => { btn.innerText = originalBtnText; }, 2000);
     }
 }
 
@@ -3651,29 +3895,27 @@ app.registerExtension({
             const onNodeCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function () {
                 const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
+                
                 const container = document.createElement("div");
                 container.classList.add("yedp-container");
-                container.style.width = "100%"; container.style.height = "100%"; 
+                // Let Vue handle the external sizing, just fill the space and hide overflow to stop corner bleeding
+                container.style.width = "100%"; 
+                container.style.height = "100%"; 
+                container.style.overflow = "hidden"; 
+                container.style.borderRadius = "8px"; // Optional: match ComfyUI's rounded corners
                 
                 const widget = this.addDOMWidget("3d_viewport", "vp", container, { serialize: false, hideOnZoom: false });
-                widget.computeSize = (w) => [w, 0];
                 
                 setTimeout(() => {
                     const vp = new YedpViewport(this, container);
                     this.vp = vp; 
-                    const onResizeOrig = this.onResize;
-                    this.onResize = function(size) {
-                        if (onResizeOrig) onResizeOrig.call(this, size);
-                        let usedHeight = 30; 
-                        if (this.widgets) for (const w of this.widgets) { if (w === widget) break; usedHeight += w.last_h || 26; }
-                        const safeHeight = Math.max(10, size[1] - usedHeight - 35);
-                        container.style.height = safeHeight + "px"; container.style.maxHeight = "none";
-                        vp.onResize(container.querySelector(".yedp-vp-area"));
-                    };
+                    
+                    // Hide the raw JSON payload input cleanly
                     const w = this.widgets?.find(w => w.name === "client_data");
                     if (w?.inputEl) w.inputEl.style.display = "none";
                 }, 100);
                 
+                // Provide a default starting size, let the user/Vue scale it from here
                 this.setSize([720, 600]);
                 
                 this.onRemoved = function() {
@@ -3681,7 +3923,7 @@ app.registerExtension({
                         this.vp.isBaking = false; this.vp.isPlaying = false;
                         if (this.vp.resizeObserver) this.vp.resizeObserver.disconnect();
                         if (this.vp.isMocapActive) {
-                            this.vp.isMocapActive = false; // Add early exit flag to kill the recursive requestAnimationFrame loop
+                            this.vp.isMocapActive = false;
                             if (this.vp.mocapTimer) clearInterval(this.vp.mocapTimer);
                             if (this.vp.mocapMediaStream) this.vp.mocapMediaStream.getTracks().forEach(t=>t.stop());
                             if (this.vp.mocapVideoEl) { this.vp.mocapVideoEl.pause(); this.vp.mocapVideoEl.srcObject = null; }
@@ -3693,7 +3935,6 @@ app.registerExtension({
                 return r;
             };
 
-            // Native ComfyUI Serialization logic!
             const onSerializeOrig = nodeType.prototype.onSerialize;
             nodeType.prototype.onSerialize = function (o) {
                 if (onSerializeOrig) onSerializeOrig.apply(this, arguments);
@@ -3707,7 +3948,6 @@ app.registerExtension({
                 if (onConfigureOrig) onConfigureOrig.apply(this, arguments);
                 if (o.scene_state) {
                     this.saved_scene_state = o.scene_state;
-                    // If the viewport has loaded early, apply it. Else, viewport init() will apply it.
                     if (this.vp && this.vp.isInitialized) {
                         this.vp.loadScene(this.saved_scene_state);
                     }
