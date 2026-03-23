@@ -26,6 +26,10 @@ if "yedp_cams" not in folder_paths.folder_names_and_paths:
 if "yedp_mocap" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_mocap"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_mocap")], {".json"})
 
+# Added: Register yedp_scenes folder for physically saving/loading node scene states
+if "yedp_scenes" not in folder_paths.folder_names_and_paths:
+    folder_paths.folder_names_and_paths["yedp_scenes"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_scenes")], {".json"})
+
 # Global Cache for massive payloads
 YEDP_PAYLOAD_CACHE = {}
 
@@ -185,6 +189,46 @@ async def save_mocap(request):
     except Exception as e:
         print(f"[Yedp] Failed to save Mocap: {e}")
         return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+# Added: API Routes for saving and fetching physical scene states
+@PromptServer.instance.routes.get("/yedp/get_scenes")
+async def get_scenes(request):
+    files = folder_paths.get_filename_list("yedp_scenes")
+    if not files:
+        files = []
+    return web.json_response({"files": files})
+
+@PromptServer.instance.routes.post("/yedp/save_scene")
+async def save_scene(request):
+    try:
+        data = await request.json()
+        name = data.get("name", "SavedScene")
+        scene_data = data.get("data", "{}")
+        
+        safe_name = "".join([c for c in name if c.isalnum() or c in [' ', '_', '-']]).rstrip()
+        safe_name = safe_name.replace(" ", "_")
+        if not safe_name.endswith(".json"):
+            safe_name += ".json"
+
+        scene_dir = folder_paths.folder_names_and_paths["yedp_scenes"][0][0]
+        os.makedirs(scene_dir, exist_ok=True)
+        
+        file_path = os.path.join(scene_dir, safe_name)
+        
+        # Depending on how the frontend serialized it, it might already be a string
+        if isinstance(scene_data, str):
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(scene_data)
+        else:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(scene_data, f)
+            
+        print(f"[Yedp] Saved Scene data to {file_path}")
+        return web.json_response({"status": "success", "file": safe_name})
+    except Exception as e:
+        print(f"[Yedp] Failed to save Scene: {e}")
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
 
 @PromptServer.instance.routes.post("/yedp/upload_payload")
 async def upload_payload(request):
