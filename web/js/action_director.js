@@ -1,7 +1,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-/** * YEDP ACTION DIRECTOR - V9.29 (Perfected Face Mocap, Offline Video, & Sequencer)
+/** * YEDP ACTION DIRECTOR - V9.3 (Perfected Face Mocap, Offline Video, & Sequencer)
  * - Update: Added Multi-Clip Animation Sequencer! Characters can now queue an infinite sequence of animations.
  * - Update: Auto-Crossfade System. Sequencer automatically calculates 0.5s overlapping weight blends.
  * - Update: Circular Time-Wrapping. Looping a character now mathematically blends the final sequence clip flawlessly back into the first.
@@ -18,6 +18,7 @@ import { api } from "/scripts/api.js";
  * - UI Update: Added custom Range Selection Slider for trimming video Face Mocap captures.
  * - UI Update: Added custom Capture Name input field for Face Mocap bindings.
  * - UI Update: Added real-time toggle between Point Cloud and Gaussian Splat for PLY environments.
+ * - Feature: Save & Load physical node states natively to prevent workflow data loss.
  */
 
 const loadThreeJS = async () => {
@@ -419,7 +420,8 @@ class YedpViewport {
         this.uiMocapDropdowns = []; 
         
         this.uiTransformInputs = {};
-        this.helpModal = null; // Store reference to help modal
+        this.helpModal = null; 
+        this.loadModal = null; // Store reference to load modal
 
         this.isHovered = false;
         this._handleKeyDown = this.handleKeyDown.bind(this);
@@ -724,8 +726,9 @@ class YedpViewport {
             this.buildViewNav(viewportDiv);
             this.buildSidebar();
             
-            // Build the help modal right after layout is structured
+            // Build the help & load modals right after layout is structured
             this.buildHelpModal(this.container);
+            this.buildLoadModal(this.container);
 
             this.addLight("ambient");
             this.addLight("directional");
@@ -804,6 +807,103 @@ class YedpViewport {
         this.helpModal.addEventListener('click', (e) => {
             if(e.target === this.helpModal) this.helpModal.style.display = "none";
         });
+    }
+
+    buildLoadModal(container) {
+        this.loadModal = document.createElement("div");
+        Object.assign(this.loadModal.style, {
+            position: "absolute", top: "0", left: "0", width: "100%", height: "100%",
+            backgroundColor: "rgba(0, 0, 0, 0.8)", zIndex: "9999",
+            display: "none", justifyContent: "center", alignItems: "center", backdropFilter: "blur(4px)"
+        });
+
+        const contentBox = document.createElement("div");
+        Object.assign(contentBox.style, {
+            width: "400px", maxHeight: "80%", backgroundColor: "#1a1a1a",
+            border: "1px solid #444", borderRadius: "8px", display: "flex", flexDirection: "column",
+            boxShadow: "0 10px 40px rgba(0,0,0,0.8)", overflow: "hidden"
+        });
+
+        const header = document.createElement("div");
+        Object.assign(header.style, {
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            padding: "12px 20px", borderBottom: "1px solid #333", backgroundColor: "#222"
+        });
+        header.innerHTML = `<span style="color:#00d2ff; font-weight:bold; font-size:16px;">📂 Load Scene</span>`;
+
+        const closeBtn = document.createElement("button");
+        closeBtn.innerText = "✖";
+        Object.assign(closeBtn.style, {
+            background: "transparent", border: "none", color: "#ccc", cursor: "pointer", fontSize: "16px", padding: "4px"
+        });
+        closeBtn.onmouseover = () => closeBtn.style.color = "#fff";
+        closeBtn.onmouseout = () => closeBtn.style.color = "#ccc";
+        closeBtn.onclick = () => this.loadModal.style.display = "none";
+        header.appendChild(closeBtn);
+
+        const body = document.createElement("div");
+        body.className = "load-body";
+        Object.assign(body.style, {
+            padding: "16px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "8px"
+        });
+
+        contentBox.append(header, body);
+        this.loadModal.appendChild(contentBox);
+        container.appendChild(this.loadModal);
+
+        this.loadModal.addEventListener('click', (e) => {
+            if(e.target === this.loadModal) this.loadModal.style.display = "none";
+        });
+    }
+
+    async showLoadModal() {
+        if (!this.loadModal) return;
+        const body = this.loadModal.querySelector('.load-body');
+        body.innerHTML = `<div style="color:#888; text-align:center;">Fetching saved scenes...</div>`;
+        this.loadModal.style.display = "flex";
+        
+        try {
+            const res = await api.fetchApi("/yedp/get_scenes");
+            const data = await res.json();
+            body.innerHTML = "";
+            
+            if (!data.files || data.files.length === 0) {
+                body.innerHTML = `<div style="color:#888; text-align:center;">No saved scenes found in input/yedp_scenes.</div>`;
+                return;
+            }
+            
+            data.files.reverse().forEach(file => {
+                const btn = document.createElement("button");
+                btn.innerText = file;
+                Object.assign(btn.style, {
+                    background: "#222", border: "1px solid #444", color: "#ccc", padding: "10px",
+                    borderRadius: "4px", cursor: "pointer", textAlign: "left", fontSize: "13px",
+                    transition: "background 0.2s", fontFamily: "monospace"
+                });
+                btn.onmouseover = () => btn.style.background = "#333";
+                btn.onmouseout = () => btn.style.background = "#222";
+                btn.onclick = async () => {
+                    const origText = btn.innerText;
+                    btn.innerText = "Loading...";
+                    btn.style.color = "#00d2ff";
+                    try {
+                        const url = `/view?filename=${encodeURIComponent(file)}&type=input&subfolder=yedp_scenes&t=${Date.now()}`;
+                        const req = await fetch(url);
+                        const sceneJsonStr = await req.text(); 
+                        await this.loadScene(sceneJsonStr);
+                        this.loadModal.style.display = "none";
+                    } catch(e) {
+                        console.error("Load failed:", e);
+                        btn.innerText = "Failed to load!";
+                        btn.style.color = "#ff5555";
+                        setTimeout(() => { btn.innerText = origText; btn.style.color = "#ccc"; }, 2000);
+                    }
+                };
+                body.appendChild(btn);
+            });
+        } catch (e) {
+            body.innerHTML = `<div style="color:#ff5555; text-align:center;">Failed to fetch scenes list.</div>`;
+        }
     }
 
     createRimTexture() {
@@ -1082,6 +1182,9 @@ class YedpViewport {
             </div>
             <div style="display:flex; gap:4px; align-items:center;">
                 <span id="lbl-res" style="color:#00d2ff; font-family:monospace; font-size:10px; margin-right:5px; align-self:center;">512x512</span>
+                <button id="btn-save-scene" style="border:1px solid #00d2ff; color:#00d2ff; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;" title="Save Scene to Disk">💾 SAVE</button>
+                <button id="btn-load-scene" style="border:1px solid #00d2ff; color:#00d2ff; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;" title="Load Scene from Disk">📂 LOAD</button>
+                <div style="width:1px; height:16px; background:#444; margin:0 2px;"></div>
                 <button id="btn-refresh" style="border:1px solid #4ade80; color:#4ade80; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;" title="Refresh Files">↻ SYNC FOLDERS</button>
                 <button id="btn-bake-frame" style="border:1px solid #ffaa00; color:#ffaa00; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE FRAME</button>
                 <button id="btn-bake" style="border:1px solid #ff0055; color:#ff0055; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE V9.28</button>
@@ -1138,6 +1241,39 @@ class YedpViewport {
             this.characters.forEach(c => { if(c.skeletonHelper) c.skeletonHelper.visible = e.target.checked; });
             this.forceUpdateFrame();
         };
+
+        // --- PHYSICAL SAVE/LOAD LOGIC ---
+        div.querySelector("#btn-save-scene").onclick = async () => {
+            const date = new Date();
+            const defaultName = `Scene_${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}_${String(date.getHours()).padStart(2,'0')}-${String(date.getMinutes()).padStart(2,'0')}`;
+            const name = prompt("Enter a name for your save file:", defaultName);
+            if (!name) return;
+            
+            const btn = div.querySelector("#btn-save-scene");
+            btn.innerText = "SAVING...";
+            try {
+                const sceneData = this.serializeScene();
+                const res = await api.fetchApi("/yedp/save_scene", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name: name, data: sceneData })
+                });
+                const result = await res.json();
+                if (result.status === "success") {
+                    btn.innerText = "SAVED ✓";
+                    setTimeout(() => btn.innerText = "💾 SAVE", 2000);
+                } else {
+                    alert("Failed to save scene.");
+                    btn.innerText = "💾 SAVE";
+                }
+            } catch (e) {
+                console.error(e);
+                alert("Error saving scene.");
+                btn.innerText = "💾 SAVE";
+            }
+        };
+
+        div.querySelector("#btn-load-scene").onclick = () => this.showLoadModal();
         
         div.querySelector("#btn-refresh").onclick = async () => {
             const btn = div.querySelector("#btn-refresh");
