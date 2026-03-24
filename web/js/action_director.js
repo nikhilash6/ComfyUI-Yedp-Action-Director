@@ -3979,21 +3979,48 @@ class YedpViewport {
             await new Promise(r => setTimeout(r, 10)); 
         }
         
-        // Restoration
+        // --- RESTORATION BLOCK START ---
         this.isBaking = false; 
-        //this.renderer.setSize(originalSize.width, originalSize.height);
         this.renderer.setSize(originalSize.width, originalSize.height, false);
         
         // Let onResize cleanly restore the offset view mapping for the layout UI
         const vpAreaRestore = this.container.querySelector(".yedp-vp-area");
         if (vpAreaRestore) this.onResize(vpAreaRestore);
         
-        if(this.isDepthMode) { this.updateCameraBounds(); } else { this.resetCamera(); }
+        // Restore camera boundaries
+        if(this.isDepthMode) { 
+            this.updateCameraBounds(); 
+        } else { 
+            this.resetCamera(); 
+        }
         
-        toggleHelpers(true); // <--- FIX: Always bring the grid and floor back!
+        // Bring back the grid, axes, and floor
+        toggleHelpers(true); 
         
+        // Restore the original background color (fixes the black screen)
+        this.scene.background = originalBg; 
+        
+        // Unhide the light gizmos
+        this.lights.forEach(l => { 
+            if (l.helper) l.helper.visible = l.type !== 'ambient'; 
+        });
+        
+        // Reattach the transform controls to whatever was selected before baking
+        if (this.selected.obj) {
+            this.selectObject(this.selected.obj, this.selected.type, this.selected.id);
+        }
+        
+        // Restore character meshes and skeletons
+        this.updateVisibilities();
+        this.characters.forEach(c => { 
+            c.skeletonHelper.visible = visSkel; 
+        });
+        
+        // Reset the bake button text
         btn.innerText = originalBtnText;
+        // --- RESTORATION BLOCK END ---
 
+        // Send to python backend
         await this.sendBakeToServer(results);
     }
 
