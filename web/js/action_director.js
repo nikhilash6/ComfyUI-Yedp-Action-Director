@@ -27,7 +27,7 @@ const loadThreeJS = async () => {
     return window._YEDP_THREE_CACHE = new Promise(async (resolve, reject) => {
         const baseUrl = new URL(".", import.meta.url).href;
         try {
-            console.log("[Yedp] Initializing Engine V9.28 (Sequencer Mode)...");
+            console.log("[Yedp] Initializing Engine V9.3 (Sequencer Mode)...");
             
             const THREE = await import(new URL("./three.module.js", baseUrl).href);
 
