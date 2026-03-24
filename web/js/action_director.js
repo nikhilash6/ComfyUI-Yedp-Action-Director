@@ -1187,7 +1187,7 @@ class YedpViewport {
                 <div style="width:1px; height:16px; background:#444; margin:0 2px;"></div>
                 <button id="btn-refresh" style="border:1px solid #4ade80; color:#4ade80; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;" title="Refresh Files">↻ SYNC FOLDERS</button>
                 <button id="btn-bake-frame" style="border:1px solid #ffaa00; color:#ffaa00; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE FRAME</button>
-                <button id="btn-bake" style="border:1px solid #ff0055; color:#ff0055; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE V9.28</button>
+                <button id="btn-bake" style="border:1px solid #ff0055; color:#ff0055; background:transparent; padding:0px 6px; font-size:10px; cursor:pointer; border-radius:3px;">BAKE V9.3</button>
             </div>
         `;
 
@@ -3825,7 +3825,7 @@ class YedpViewport {
         const THREE = this.THREE;
         
         const btnId = isSingleFrame ? '#btn-bake-frame' : '#btn-bake';
-        const originalBtnText = isSingleFrame ? 'BAKE FRAME' : 'BAKE V9.28';
+        const originalBtnText = isSingleFrame ? 'BAKE FRAME' : 'BAKE V9.3';
         const btn = this.container.querySelector(btnId); btn.innerText = "PREPARING...";
         
         this.isBaking = true; this.isPlaying = false;
@@ -4018,7 +4018,7 @@ class YedpViewport {
             console.error("[Yedp] Failed to send bake to server", e);
             alert("Bake upload failed. See console.");
         } finally {
-            if (btn) btn.innerText = "BAKE V9.28";
+            if (btn) btn.innerText = "BAKE V9.3";
         }
     }
 }
