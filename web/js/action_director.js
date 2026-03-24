@@ -3998,18 +3998,43 @@ class YedpViewport {
     }
 
     async sendBakeToServer(results) {
-        const btn = this.container.querySelector("#btn-bake");
-        if (btn) btn.innerText = "SENDING...";
+        // Find whichever button triggered the bake to update its text
+        const btn = this.container.querySelector("#btn-bake") || this.container.querySelector("#btn-bake-frame");
+        const originalBtnText = btn ? btn.innerText : "BAKE";
+        if (btn) btn.innerText = "PREPARING UPLOAD...";
 
         try {
-            const res = await api.fetchApi("/yedp/upload_payload", {
+            // 1. Generate a unique payload ID for this session
+            const payloadId = `yedp_payload_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            
+            // 2. Upload each visual pass as an individual chunk to avoid aiohttp limits
+            const passNames = Object.keys(results);
+            for (let i = 0; i < passNames.length; i++) {
+                const passName = passNames[i];
+                if (btn) btn.innerText = `UPLOADING PASS ${i + 1}/${passNames.length}`;
+                
+                await api.fetchApi("/yedp/upload_payload_chunk", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        payload_id: payloadId,
+                        pass: passName,
+                        frames: results[passName]
+                    })
+                });
+            }
+
+            // 3. Tell Python we are done and receive the final payload ID for the node execution
+            if (btn) btn.innerText = "FINISHING UPLOAD...";
+            const res = await api.fetchApi("/yedp/upload_payload_finish", {
                 method: "POST",
-                body: JSON.stringify(results) // Reverted back to raw results so Python nodes.py can parse data.get("pose")
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ payload_id: payloadId })
             });
+            
             const data = await res.json();
             if (data.payload_id) {
-                // Reverted the widget target back to "client_data" as defined in nodes.py
-                const widget = this.node.widgets.find(w => w.name === "client_data");
+                const widget = this.node.widgets?.find(w => w.name === "client_data");
                 if (widget) {
                     widget.value = data.payload_id;
                 }
@@ -4018,7 +4043,7 @@ class YedpViewport {
             console.error("[Yedp] Failed to send bake to server", e);
             alert("Bake upload failed. See console.");
         } finally {
-            if (btn) btn.innerText = "BAKE V9.3";
+            if (btn) btn.innerText = originalBtnText;
         }
     }
 }
