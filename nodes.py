@@ -18,24 +18,22 @@ if "yedp_anims" not in folder_paths.folder_names_and_paths:
 if "yedp_envs" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_envs"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_envs")], {".glb", ".gltf", ".fbx", ".obj", ".ply", ".splat", ".ksplat", ".spz", ".sog"})
 
-# Added: Register yedp_cams folder
 if "yedp_cams" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_cams"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_cams")], {".glb", ".fbx"})
 
-# Added: Register yedp_mocap folder for saving/loading face tracks
 if "yedp_mocap" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_mocap"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_mocap")], {".json"})
 
-# Added: Register yedp_scenes folder for physically saving/loading node scene states
 if "yedp_scenes" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_scenes"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_scenes")], {".json"})
 
-# Global Cache for massive payloads
+# Global Caches for massive payloads
 YEDP_PAYLOAD_CACHE = {}
+YEDP_CHUNKS = {}
 
 class YedpActionDirector:
     """
-    ComfyUI-Yedp-Action-Director (V9.28 Edition - Sequencer, Mocap, & Textured Pass)
+    ComfyUI-Yedp-Action-Director (V9.3 Edition - Sequencer, Mocap, & Textured Pass)
     """
     
     def __init__(self):
@@ -96,32 +94,30 @@ class YedpActionDirector:
         return torch.stack(tensor_list)
 
     def render(self, width, height, frame_count, fps, client_data=None, unique_id=None):
-        # 1. Check if Data Exists
         if not client_data or len(client_data) < 10:
             print("[Yedp] ERROR: No image data received from frontend.")
             red_frame = torch.zeros((1, height, width, 3))
             red_frame[:,:,:,0] = 1.0 
             return (red_frame, red_frame, red_frame, red_frame, red_frame, red_frame, red_frame)
 
-        # 2. Check if it's a Memory Cache ID instead of raw JSON
         global YEDP_PAYLOAD_CACHE
+        data = {}
+        
         if client_data.startswith("yedp_payload_"):
             if client_data in YEDP_PAYLOAD_CACHE:
-                client_data = YEDP_PAYLOAD_CACHE[client_data]
+                data = YEDP_PAYLOAD_CACHE[client_data]
             else:
                 print(f"[Yedp] ERROR: Payload ID {client_data} not found in memory cache! Please click BAKE in the node again.")
                 red_frame = torch.zeros((1, height, width, 3))
                 red_frame[:,:,:,0] = 1.0 
                 return (red_frame, red_frame, red_frame, red_frame, red_frame, red_frame, red_frame)
+        else:
+            try:
+                data = json.loads(client_data)
+            except json.JSONDecodeError as e:
+                print(f"[Yedp] JSON Decode Error.")
+                raise ValueError("Failed to parse JSON from client.")
 
-        # 3. Parse JSON
-        try:
-            data = json.loads(client_data)
-        except json.JSONDecodeError as e:
-            print(f"[Yedp] JSON Decode Error.")
-            raise ValueError("Failed to parse JSON from client.")
-
-        # 4. Decode Batches
         pose_batch = self.decode_batch(data.get("pose", []), width, height, "pose")
         depth_batch = self.decode_batch(data.get("depth", []), width, height, "depth")
         canny_batch = self.decode_batch(data.get("canny", []), width, height, "canny")
@@ -155,7 +151,6 @@ async def get_cams(request):
         files = []
     return web.json_response({"files": files})
 
-# Added: API Route for fetching mocaps from disk
 @PromptServer.instance.routes.get("/yedp/get_mocaps")
 async def get_mocaps(request):
     files = folder_paths.get_filename_list("yedp_mocap")
@@ -163,7 +158,6 @@ async def get_mocaps(request):
         files = []
     return web.json_response({"files": files})
 
-# Added: API Route for saving a generated mocap tracking file to disk
 @PromptServer.instance.routes.post("/yedp/save_mocap")
 async def save_mocap(request):
     try:
@@ -171,12 +165,10 @@ async def save_mocap(request):
         name = data.get("name", "Capture")
         mocap_id = data.get("id", uuid.uuid4().hex[:8])
         
-        # Clean up the file name to avoid invalid path characters
         safe_name = "".join([c for c in name if c.isalnum() or c in [' ', '_']]).rstrip()
         safe_name = safe_name.replace(" ", "_")
         file_name = f"{safe_name}_{mocap_id}.json"
 
-        # Ensure directory exists
         mocap_dir = folder_paths.folder_names_and_paths["yedp_mocap"][0][0]
         os.makedirs(mocap_dir, exist_ok=True)
         
@@ -190,7 +182,6 @@ async def save_mocap(request):
         print(f"[Yedp] Failed to save Mocap: {e}")
         return web.json_response({"status": "error", "message": str(e)}, status=500)
 
-# Added: API Routes for saving and fetching physical scene states
 @PromptServer.instance.routes.get("/yedp/get_scenes")
 async def get_scenes(request):
     files = folder_paths.get_filename_list("yedp_scenes")
@@ -215,7 +206,6 @@ async def save_scene(request):
         
         file_path = os.path.join(scene_dir, safe_name)
         
-        # Depending on how the frontend serialized it, it might already be a string
         if isinstance(scene_data, str):
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(scene_data)
@@ -230,33 +220,50 @@ async def save_scene(request):
         return web.json_response({"status": "error", "message": str(e)}, status=500)
 
 
-@PromptServer.instance.routes.post("/yedp/upload_payload")
-async def upload_payload(request):
+@PromptServer.instance.routes.post("/yedp/upload_payload_chunk")
+async def upload_payload_chunk(request):
     """
-    Stores the massive base64 JSON payload in python memory to prevent 
-    ComfyUI from crashing the browser's localStorage.
+    Receives individual render passes to prevent reaching the 100MB aiohttp size limit.
     """
-    raw_text = await request.text()
-    payload_id = f"yedp_payload_{uuid.uuid4().hex}"
+    data = await request.json()
+    payload_id = data.get("payload_id")
+    pass_name = data.get("pass")
+    frames = data.get("frames", [])
     
-    global YEDP_PAYLOAD_CACHE
-    YEDP_PAYLOAD_CACHE[payload_id] = raw_text
-    
-    # Keep cache clean (only retain the last 3 bakes to prevent RAM bloat)
-    if len(YEDP_PAYLOAD_CACHE) > 3:
-        oldest_key = list(YEDP_PAYLOAD_CACHE.keys())[0]
-        del YEDP_PAYLOAD_CACHE[oldest_key]
+    global YEDP_CHUNKS
+    if payload_id not in YEDP_CHUNKS:
+        YEDP_CHUNKS[payload_id] = {}
         
-    return web.json_response({"payload_id": payload_id})
+    YEDP_CHUNKS[payload_id][pass_name] = frames
+    return web.json_response({"status": "ok"})
 
-# Added: API Route for scanning the node's /web/ directory for extra rigs
+
+@PromptServer.instance.routes.post("/yedp/upload_payload_finish")
+async def upload_payload_finish(request):
+    """
+    Consolidates the chunks into the final memory payload ready for the node execution.
+    """
+    data = await request.json()
+    payload_id = data.get("payload_id")
+    
+    global YEDP_PAYLOAD_CACHE, YEDP_CHUNKS
+    if payload_id in YEDP_CHUNKS:
+        YEDP_PAYLOAD_CACHE[payload_id] = YEDP_CHUNKS.pop(payload_id)
+        
+        if len(YEDP_PAYLOAD_CACHE) > 3:
+            oldest_key = list(YEDP_PAYLOAD_CACHE.keys())[0]
+            del YEDP_PAYLOAD_CACHE[oldest_key]
+            
+        return web.json_response({"payload_id": payload_id})
+    return web.json_response({"error": "payload not found"}, status=400)
+
+
 @PromptServer.instance.routes.get("/yedp/get_rigs")
 async def get_rigs(request):
     web_dir = os.path.join(os.path.dirname(__file__), "web")
     if not os.path.exists(web_dir):
         return web.json_response({"files": ["Yedp_Rig.glb"]})
     
-    # Look for any .glb, .gltf, or .fbx files placed manually by the user
     files = [f for f in os.listdir(web_dir) if f.lower().endswith(('.glb', '.gltf', '.fbx'))]
     if "Yedp_Rig.glb" not in files:
         files.insert(0, "Yedp_Rig.glb")
