@@ -101,7 +101,7 @@
         <p>The 3D Viewport is divided into three main areas: the <strong>Top Header Bar</strong>, the <strong>3D Canvas</strong>, and the <strong>Bottom Timeline</strong>.</p>
         
         <h4>The Top Header Bar</h4>
-        <p>This bar controls your viewport rendering modes and baking triggers.</p>
+        <p>This bar controls your viewport rendering modes, physical saving, and baking triggers.</p>
 
         <div class="image-block">
             <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/header_bar.png" alt="Header Bar UI" onerror="this.outerHTML='<div style=\'color:#888; padding:20px;\'>[ Missing Image: Please add header_bar.png to manual_images/ folder ]</div>'">
@@ -117,8 +117,9 @@
                 </ul>
             </li>
             <li><span class="highlight">Depth Controls (NEAR / FAR):</span> Only visible in Depth mode. These dictate the minimum and maximum clipping range of the depth map. Adjust these to get the best contrast in your depth output!</li>
+            <li><span class="highlight">💾 SAVE / 📂 LOAD:</span> Safely save and restore your entire 3D scene setup directly to your hard drive. This bypasses ComfyUI's volatile workflow memory and prevents data loss if you accidentally delete the node. Saves are stored as `.json` files in the <code>input/yedp_scenes/</code> folder.</li>
             <li><span class="highlight">↻ SYNC FOLDERS:</span> Refreshes the custom_nodes/ComfyUI-Yedp-Action-Director/web and input/yedp_... folders. Click this if you just added a new 3D model or animation to your folders and need it to show up in the menus.</li>
-            <li><span class="warning">BAKE FRAME / BAKE V9.28:</span> Triggers the rendering process. <em>Bake Frame</em> renders only the current frame, while <em>Bake V9.28</em> renders the entire frame count.</li>
+            <li><span class="warning">BAKE FRAME / BAKE V9.3:</span> Triggers the rendering process. <em>Bake Frame</em> renders only the current frame, while <em>Bake V9.3</em> renders the entire frame count.</li>
         </ul>
 
         <h4>The Timeline</h4>
@@ -221,6 +222,8 @@
 
         <ul>
             <li><strong>Source:</strong> Choose <em>Webcam</em> for live capture, or <em>Video File</em> to upload a local video.</li>
+            <li><strong>Video Trim Slider:</strong> When using a <em>Video File</em>, a dual-handle range slider appears. This allows you to trim exactly which segment of the video you want to process, saving time and memory!</li>
+            <li><strong>Capture Name:</strong> Before recording or processing, you can type a custom name into the text field so it's easier to identify in your dropdown menus later.</li>
             <li><strong>Start / Rec:</strong> Click Start to initialize MediaPipe. Click Rec to capture the motion.</li>
             <li><em>Note for Video:</em> Recording a video file happens offline sequentially, ensuring perfect 30fps tracking with zero dropped frames.</li>
             <li><strong>Save:</strong> Saves the tracked facial data to your local `/input/yedp_mocap/` folder as a reusable JSON file.</li>
@@ -237,12 +240,12 @@
         <ul>
             <li><strong>+ Add Env:</strong> Creates a new environment container.</li>
             <li><strong>Model Selection:</strong> Dropdown reads from your `input/yedp_envs` folder. Supports .glb, .gltf, .fbx, .obj, and .ply.</li>
-            <li><strong>Gaussian Splats (.ply):</strong> The Action Director natively supports Gaussian Splat point clouds! When you load a .ply file, it will render its original vertex colors in the <em>Textured</em> pass, and automatically cast dense, accurate shadows and depth-maps using a custom internal shader.</li>
+            <li><strong>Gaussian Splats (.ply):</strong> The Action Director natively supports Gaussian Splat point clouds! When you load a .ply file, it will render its original vertex colors in the <em>Textured</em> pass, and automatically cast dense, accurate shadows and depth-maps using a custom internal shader. You can easily toggle whether a `.ply` file renders as standard points or as a Gaussian Splat using the checkbox (if the checkbox isn't visible click on the "Sync Folders" button).</li>
             <li><strong>Loop (Anim):</strong> If your imported environment contains an animation (like a spinning fan or moving platform), this toggles whether it loops.</li>
         </ul>
 
         <h3>5. Baking & Outputs</h3>
-        <p>When your scene is ready, click <strong class="warning">BAKE V9.28</strong> at the top right of the viewport.</p>
+        <p>When your scene is ready, click <strong class="warning">BAKE V9.3</strong> at the top right of the viewport.</p>
         <p>The engine will lock the UI, compress the canvas, and render your frame count perfectly. Once it finishes uploading to the ComfyUI backend, the node will output 7 individual image batches that you can route into standard nodes:</p>
         
         <ul>
@@ -267,7 +270,8 @@
             Animations:   input/yedp_anims/ <span>(.glb, .fbx, .bvh)</span><br>
             Environments: input/yedp_envs/ <span>(.glb, .fbx, .obj, .ply)</span><br>
             Cameras:      input/yedp_cams/ <span>(.glb, .fbx)</span><br>
-            Mocap Data:   input/yedp_mocap/ <span>(.json)</span>
+            Mocap Data:   input/yedp_mocap/ <span>(.json)</span><br>
+            Saved Scenes: input/yedp_scenes/ <span>(.json)</span>
         </div>
 
         <div class="image-block">
