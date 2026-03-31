@@ -32,7 +32,7 @@ https://github.com/user-attachments/assets/9e7d56c9-e2cd-4ff6-a505-93e4eabae959
 
 <img width="105" height="94" alt="image" src="https://github.com/user-attachments/assets/de1eec41-84ea-4c8f-94b3-74e25b3d0ac0" />
 
-## **🚀 What's New in V9.3 (Path Tracing, HDRI & Workflow Upgrades)**
+## **🚀 What's New in V9.3 (Path Tracing, HDRI, Gaussian Splatting & Workflow Upgrades)**
 
 ### **✨ Physically Based Rendering & Lighting**
 * **Path Tracing Engine:** A massive leap in render quality! You can now enable physically accurate ray-bouncing for your Shaded passes. The engine smartly drops back to the lightning-fast WebGL rasterizer while you move the camera or scrub the timeline, then progressively accumulates high-quality path-traced samples the second you stop.
