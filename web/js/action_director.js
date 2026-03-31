@@ -47,11 +47,21 @@ const loadThreeJS = async () => {
             const { FBXLoader } = await import(new URL("./FBXLoader.js", baseUrl).href);
             const { BVHLoader } = await import(new URL("./BVHLoader.js", baseUrl).href);
             const { PLYLoader } = await import(new URL("./PLYLoader.js", baseUrl).href);
+            const { HDRLoader } = await import(new URL("./HDRLoader.js", baseUrl).href);
             const { clone } = await import(new URL("./SkeletonUtils.js", baseUrl).href);
             const splatLib = await import(new URL("./gaussian-splats-3d.module.js", baseUrl).href);
             const DropInViewer = splatLib.DropInViewer || splatLib.default?.DropInViewer;
 
-            resolve({ THREE, OrbitControls, TransformControls, GLTFLoader, FBXLoader, BVHLoader, PLYLoader, SkeletonUtils: { clone }, DropInViewer });
+            // --- NEW: Path Tracing Imports ---
+            const bvhLib = await import(new URL("./three-mesh-bvh.module.js?t=" + Date.now(), baseUrl).href);
+            THREE.BufferGeometry.prototype.computeBoundsTree = bvhLib.computeBoundsTree;
+            THREE.BufferGeometry.prototype.disposeBoundsTree = bvhLib.disposeBoundsTree;
+            THREE.Mesh.prototype.raycast = bvhLib.acceleratedRaycast;
+            
+            const ptLib = await import(new URL("./three-gpu-pathtracer.module.js?t=" + Date.now(), baseUrl).href);
+            // ---------------------------------
+            
+            resolve({ THREE, OrbitControls, TransformControls, GLTFLoader, FBXLoader, BVHLoader, PLYLoader, HDRLoader, SkeletonUtils: { clone }, DropInViewer, bvhLib, ptLib });
             
         } catch (e) {
             console.error("[Yedp] Critical Engine Load Failure:", e);
@@ -396,6 +406,16 @@ class YedpViewport {
         this.isShadedMode = false;
         this.isDepthMode = false;
         this.isTexturedMode = false;
+        // --- NEW: Path Tracing State ---
+        this.isPathTracingEnabled = false;
+        this.ptRenderer = null;
+        this.ptSceneGenerator = null;
+        this.ptPreviewSamples = 32;   // Slider target for viewport preview
+        this.ptBakeSamples = 128;     // Slider target for final sequence bake
+        this.ptAccumulatedSamples = 0; // Current sample count
+        this.needsPtReset = true;      // Flag to tell the accumulator to clear and restart
+        this.needsPtBvhUpdate = true;  // NEW: Flag for slow mesh/bone updates vs fast camera updates
+        // -------------------------------
         this.userNear = 0.1;
         this.userFar = 10.0;
         this.defaultNear = 0.1;
@@ -404,6 +424,7 @@ class YedpViewport {
         this.isPlaying = false;
         this.isBaking = false; 
         this.globalTime = 0;
+        this.isCameraMoving = false;
         
         this.renderWidth = 512;
         this.renderHeight = 512;
@@ -411,6 +432,13 @@ class YedpViewport {
         this.availableEnvs = ["none"];
         this.availableCams = ["none"];
         this.availableRigs = ["Yedp_Rig.glb"];
+
+        this.availableHdris = ["none"];
+        this.currentHdriMap = null;
+        this.isHdriEnabled = false;
+        this.isHdriBgEnabled = false;
+        this.hdriIntensity = 1.0;
+        this.hdriRotation = 0;
 
         this.uiSidebar = null;
         this.uiCharList = null;
@@ -433,6 +461,140 @@ class YedpViewport {
         this.init();
     }
 
+    async fetchHdris() {
+        try {
+            const res = await api.fetchApi("/yedp/get_hdris");
+            const data = await res.json();
+            if (data.files && data.files.length > 0) this.availableHdris = ["none", ...data.files.filter(f => f !== "none")];
+        } catch(e) { console.error("Failed to fetch HDRIs."); }
+    }
+
+    async loadHDRI(filename) {
+        this.hdriFile = filename; // <-- WE MUST TRACK THE FILENAME FOR SAVING
+        if (!filename || filename === "none") {
+            this.currentHdriMap = null;
+            this.updateHDRI();
+            return;
+        }
+        const url = `/view?filename=${filename}&type=input&subfolder=yedp_hdri&t=${Date.now()}`;
+        try {
+            const loader = new this.HDRLoader(); 
+            const texture = await loader.loadAsync(url);
+            texture.mapping = this.THREE.EquirectangularReflectionMapping;
+            this.currentHdriMap = texture;
+            this.updateHDRI();
+        } catch(e) { 
+            console.error("HDRI Load Error", e); 
+        }
+    }
+
+    updateHDRI() {
+        const rotDeg = parseFloat(this.hdriRotation) || 0;
+        const rotRad = this.THREE.MathUtils.degToRad(rotDeg);
+        const intensity = parseFloat(this.hdriIntensity) || 1.0;
+
+        // --- NINJA PATCH: Ensure Path Tracer always gets the RAW map ---
+        if (this.ptRenderer && !this.ptRenderer._isYedpPatched) {
+            const originalSetScene = this.ptRenderer.setScene.bind(this.ptRenderer);
+            this.ptRenderer.setScene = (s, c) => {
+                const tEnv = s.environment; const tBg = s.background;
+                if (this.isHdriEnabled && this.currentHdriMap) {
+                    s.environment = this.currentHdriMap;
+                    s.background = this.isHdriBgEnabled ? this.currentHdriMap : new this.THREE.Color(0x1a1a1a);
+                }
+                originalSetScene(s, c);
+                s.environment = tEnv; s.background = tBg;
+            };
+            this.ptRenderer._isYedpPatched = true;
+        }
+
+        if (this.isHdriEnabled && this.currentHdriMap) {
+            
+            // --- 1. SETUP WEBGL CUBE CAMERA ---
+            if (!this.hdriScene) {
+                this.hdriScene = new this.THREE.Scene();
+                const options = {
+                    generateMipmaps: true,
+                    minFilter: this.THREE.LinearMipmapLinearFilter,
+                    magFilter: this.THREE.LinearFilter,
+                    type: this.currentHdriMap.type || this.THREE.HalfFloatType,
+                    format: this.currentHdriMap.format || this.THREE.RGBAFormat
+                };
+                if (this.currentHdriMap.colorSpace) options.colorSpace = this.currentHdriMap.colorSpace;
+                
+                this.hdriRenderTarget = new this.THREE.WebGLCubeRenderTarget(512, options);
+                this.hdriCamera = new this.THREE.CubeCamera(0.1, 100, this.hdriRenderTarget);
+                this.hdriScene.add(this.hdriCamera);
+            }
+
+            // --- 2. BAKE ROTATED CUBEMAP ---
+            this.hdriScene.background = this.currentHdriMap;
+            this.hdriCamera.rotation.y = rotRad; 
+            this.hdriCamera.updateMatrixWorld();
+            
+            const currentRenderTarget = this.renderer.getRenderTarget();
+            this.hdriCamera.update(this.renderer, this.hdriScene);
+            this.renderer.setRenderTarget(currentRenderTarget);
+
+            // --- 3. FEED BAKED CUBEMAP TO WEBGL ---
+            this.scene.environment = this.hdriRenderTarget.texture;
+            this.scene.background = this.isHdriBgEnabled ? this.hdriRenderTarget.texture : new this.THREE.Color(0x1a1a1a);
+            
+            if (!this.scene.environmentRotation) this.scene.environmentRotation = new this.THREE.Euler();
+            if (!this.scene.backgroundRotation) this.scene.backgroundRotation = new this.THREE.Euler();
+            this.scene.environmentRotation.y = rotRad;
+            this.scene.backgroundRotation.y = rotRad;
+            this.scene.environmentIntensity = intensity;
+            this.scene.backgroundIntensity = intensity;
+            
+            this.scene.traverse((child) => {
+                if (child.isMesh && child.material) {
+                    const updateMat = (mat) => {
+                        if (mat.envMapIntensity !== undefined) mat.envMapIntensity = intensity;
+                        mat.needsUpdate = true;
+                    };
+                    if (Array.isArray(child.material)) child.material.forEach(updateMat);
+                    else updateMat(child.material);
+                }
+            });
+
+            // --- 4. UPDATE PATH TRACER ---
+            if (this.ptRenderer) {
+                const tEnv = this.scene.environment; const tBg = this.scene.background;
+                this.scene.environment = this.currentHdriMap;
+                this.scene.background = this.isHdriBgEnabled ? this.currentHdriMap : new this.THREE.Color(0x1a1a1a);
+                
+                this.ptRenderer.updateEnvironment();
+                this.needsPtReset = true;
+                
+                this.scene.environment = tEnv;
+                this.scene.background = tBg;
+            }
+
+        } else {
+            this.scene.environment = null;
+            this.scene.background = new this.THREE.Color(0x1a1a1a);
+
+            if (this.ptRenderer) {
+                this.ptRenderer.updateEnvironment();
+                this.needsPtReset = true;
+            }
+
+            this.scene.traverse((child) => {
+                if (child.isMesh && child.material) {
+                    const resetMat = (mat) => {
+                        if (mat.envMapIntensity !== undefined) mat.envMapIntensity = 1.0;
+                        mat.needsUpdate = true;
+                    };
+                    if (Array.isArray(child.material)) child.material.forEach(resetMat);
+                    else resetMat(child.material);
+                }
+            });
+        }
+        
+        this.forceUpdateFrame();
+    }
+
     async init() {
         try {
             const libs = await loadThreeJS();
@@ -443,8 +605,14 @@ class YedpViewport {
             this.FBXLoader = libs.FBXLoader; 
             this.BVHLoader = libs.BVHLoader;
             this.PLYLoader = libs.PLYLoader;
+            this.HDRLoader = libs.HDRLoader;
             this.DropInViewer = libs.DropInViewer;
             window._YEDP_SKEL_UTILS = libs.SkeletonUtils;
+
+            // --- Map the Path Tracing Libraries ---
+            this.bvhLib = libs.bvhLib;
+            this.ptLib = libs.ptLib;
+            // -------------------------------------------
 
             const createMats = () => {
                 const m = {
@@ -584,8 +752,8 @@ class YedpViewport {
             this.scene.add(this.axesHelper);
 
             const floorGeo = new this.THREE.PlaneGeometry(50, 50);
-            const floorMat = new this.THREE.ShadowMaterial({ opacity: 0.6 });
-            this.floor = new this.THREE.Mesh(floorGeo, floorMat);
+            this.floorMat = new this.THREE.ShadowMaterial({ opacity: 0.6 }); 
+            this.floor = new this.THREE.Mesh(floorGeo, this.floorMat);
             this.floor.rotation.x = -Math.PI / 2;
             this.floor.receiveShadow = true;
             this.scene.add(this.floor);
@@ -623,6 +791,20 @@ class YedpViewport {
             else this.renderer.outputEncoding = this.THREE.sRGBEncoding;
             
             this.renderer.shadowMap.enabled = true;
+
+            // --- NEW: Path Tracer Init ---
+            if (this.ptLib && this.ptLib.WebGLPathTracer) {
+                this.ptRenderer = new this.ptLib.WebGLPathTracer(this.renderer);
+                //this.ptRenderer.tiles.set(2, 2); // Splits the render into tiles to prevent GPU timeouts on heavy scenes
+                this.ptRenderer.bounces = 3;     // Keep bounces low (3) for real-time IC Light shading
+                this.ptRenderer.renderScale = 1; 
+
+                this.ptRenderer.rasterizeScene = false;   // Stops the WebGL scene from rendering underneath
+                this.ptRenderer.fadeDuration = 0;         // Removes the blurry fade-in effect
+                this.ptRenderer.filterGlossyFactor = 0.5; // Blurs glossy rays slightly to kill bright fireflies
+            }
+            // -----------------------------
+
             this.renderer.shadowMap.type = this.THREE.PCFSoftShadowMap;
 
             viewportDiv.appendChild(this.renderer.domElement);
@@ -641,8 +823,16 @@ class YedpViewport {
             this.controls = new this.OrbitControls(this.camera, this.renderer.domElement);
             this.controls.target.set(0, 1, 0);
             this.controls.enableDamping = true;
+
+            // --- NEW: Track camera movement for WebGL Fallback ---
+            this.controls.addEventListener('start', () => { this.isCameraMoving = true; });
+            this.controls.addEventListener('end', () => { 
+                this.isCameraMoving = false; 
+                this.needsPtReset = true; 
+            });
             
             this.controls.addEventListener('change', () => {
+                this.needsPtReset = true; 
                 if (this.selected && this.selected.type === 'camera' && this.uiTransformInputs) {
                     const isTyping = Object.values(this.uiTransformInputs).some(inp => inp === document.activeElement);
                     if (!isTyping) this.updateTransformUIFromObject();
@@ -650,12 +840,22 @@ class YedpViewport {
             });
 
             this.transformControls = new this.TransformControls(this.camera, this.renderer.domElement);
+            
             this.transformControls.addEventListener('dragging-changed', (event) => {
                 this.controls.enabled = !event.value && !this.isCameraOverride;
             });
+            
             this.transformControls.addEventListener('change', () => {
                 this.updateTransformUIFromObject();
+                this.needsPtReset = true; // Just clear the noise when the gizmo rotates
             });
+
+            // THIS PREVENTS THE FREEZE: Only rebuild BVH when an object is actually moved!
+            this.transformControls.addEventListener('objectChange', () => {
+                this.needsPtBvhUpdate = true;  
+                this.needsPtReset = true;
+            });
+            
             this.scene.add(this.transformControls);
 
             this.raycaster = new this.THREE.Raycaster();
@@ -719,6 +919,7 @@ class YedpViewport {
             await this.fetchCams(); 
             await this.fetchMocaps(); 
             await this.fetchRigs();
+            await this.fetchHdris();
 
             this.setupHeader(headerDiv);
             this.setupTimeline(timelineDiv);
@@ -927,6 +1128,8 @@ class YedpViewport {
 
     // --- COMfyUI STATE SERIALIZATION ---
     serializeScene() {
+        if (!this.camera || !this.controls) return null; // SAFETY CHECK
+
         return JSON.stringify({
             version: 3,
             camera: {
@@ -975,7 +1178,15 @@ class YedpViewport {
                 isTexturedMode: this.isTexturedMode,
                 userNear: this.userNear,
                 userFar: this.userFar,
-                customCamAnim: this.container.querySelector("#sel-cam-anim")?.value || "none"
+                customCamAnim: this.container.querySelector("#sel-cam-anim")?.value || "none",
+                isPathTracingEnabled: this.isPathTracingEnabled,
+                ptPreviewSamples: this.ptPreviewSamples,
+                ptBakeSamples: this.ptBakeSamples,
+                hdriFile: this.hdriFile || "none",
+                isHdriEnabled: this.isHdriEnabled,
+                isHdriBgEnabled: this.isHdriBgEnabled,
+                hdriRotation: this.hdriRotation,
+                hdriIntensity: this.hdriIntensity
             }
         });
     }
@@ -1003,6 +1214,33 @@ class YedpViewport {
                 const inpN = this.container.querySelector("#inp-near"); if(inpN) inpN.value = this.userNear;
                 const inpF = this.container.querySelector("#inp-far"); if(inpF) inpF.value = this.userFar;
                 if (this.isDepthMode) this.container.querySelector("#depth-ctrls").style.opacity = "1.0";
+                this.isPathTracingEnabled = state.settings.isPathTracingEnabled || false;
+                const chkPt = this.container.querySelector("#chk-pt-en"); if(chkPt) chkPt.checked = this.isPathTracingEnabled;
+                
+                this.ptPreviewSamples = state.settings.ptPreviewSamples || 32;
+                this.ptBakeSamples = state.settings.ptBakeSamples || 128;
+                // Note: If you want the sliders to visually update their numbers, you can select them by creating IDs for them too, 
+                // but they will respect the internal variables regardless.
+                
+                this.isHdriEnabled = state.settings.isHdriEnabled || false;
+                const chkHdriEn = this.container.querySelector("#chk-hdri-en"); if(chkHdriEn) chkHdriEn.checked = this.isHdriEnabled;
+                
+                this.isHdriBgEnabled = state.settings.isHdriBgEnabled || false;
+                const chkHdriBg = this.container.querySelector("#chk-hdri-bg"); if(chkHdriBg) chkHdriBg.checked = this.isHdriBgEnabled;
+                
+                this.hdriRotation = state.settings.hdriRotation || 0;
+                const sldRot = this.container.querySelector("#sld-hdri-rot"); if(sldRot) sldRot.value = this.hdriRotation;
+                const inpRot = this.container.querySelector("#inp-hdri-rot"); if(inpRot) inpRot.value = this.hdriRotation;
+                
+                this.hdriIntensity = state.settings.hdriIntensity !== undefined ? state.settings.hdriIntensity : 1.0;
+                const inpInt = this.container.querySelector("#inp-hdri-int"); if(inpInt) inpInt.value = this.hdriIntensity;
+                
+                this.hdriFile = state.settings.hdriFile || "none";
+                const selHdriUI = this.container.querySelector("#sel-hdri"); if(selHdriUI) selHdriUI.value = this.hdriFile;
+                
+                if (this.hdriFile !== "none") {
+                    this.loadHDRI(this.hdriFile);
+                }
             }
 
             if (state.camera) {
@@ -1139,6 +1377,7 @@ class YedpViewport {
             this.syncMocapDropdowns();
             this.renderMocapBindings();
             this.forceUpdateFrame();
+            
 
         } catch (e) {
             console.error("[Yedp] Failed to load saved scene state:", e);
@@ -1160,6 +1399,12 @@ class YedpViewport {
         this.environments.forEach(e => e.group.updateMatrixWorld(true));
         
         if (this.controls) this.controls.update();
+
+        // --- NEW: Path Tracer Update Flags ---
+        this.needsPtReset = true;
+        this.needsPtBvhUpdate = true;
+        if (this.ptRenderer && this.ptRenderer.scene) this.ptRenderer.updateLights();
+        // -------------------------------------
     }
 
     // --- UI SETUP ---
@@ -1283,9 +1528,19 @@ class YedpViewport {
             await this.fetchCams();
             await this.fetchMocaps();
             await this.fetchRigs();
+            await this.fetchHdris();
             
             this.renderCharacterCards();
             this.renderEnvironmentCards();
+
+            // update the HDRI dropdown:
+            const selHdriUI = this.container.querySelector("#sel-hdri");
+            if (selHdriUI) {
+                const currentHdri = selHdriUI.value;
+                selHdriUI.innerHTML = "";
+                this.availableHdris.forEach(h => selHdriUI.add(new Option(h, h)));
+                selHdriUI.value = this.availableHdris.includes(currentHdri) ? currentHdri : "none";
+            }
             
             const selCam = this.container.querySelector("#sel-cam-anim");
             if (selCam) {
@@ -1859,14 +2114,14 @@ class YedpViewport {
     };
 
     const camRow1 = document.createElement("div"); camRow1.style.display = "flex"; camRow1.style.gap = "4px"; camRow1.style.marginBottom = "4px";
-        const btnSetStart = createBtn("Set Start"); const btnSetEnd = createBtn("Set End");
+        const btnSetStart = createBtn("Set Start Frame"); const btnSetEnd = createBtn("Set End Frame");
         btnSetStart.onclick = () => {
             this.camKeys.start = { pos: this.camera.position.clone(), quat: this.camera.quaternion.clone(), target: this.controls.target.clone(), zoom: this.camera.zoom };
-            btnSetStart.innerText = "Start Set ✓"; btnSetStart.style.borderColor = "#0f0";
+            btnSetStart.innerText = "Start Frame Set ✓"; btnSetStart.style.borderColor = "#0f0";
         };
         btnSetEnd.onclick = () => {
             this.camKeys.end = { pos: this.camera.position.clone(), quat: this.camera.quaternion.clone(), target: this.controls.target.clone(), zoom: this.camera.zoom };
-            btnSetEnd.innerText = "End Set ✓"; btnSetEnd.style.borderColor = "#0f0";
+            btnSetEnd.innerText = "End Frame Set ✓"; btnSetEnd.style.borderColor = "#0f0";
         };
         
         const camRow2 = document.createElement("div"); camRow2.style.display = "flex"; camRow2.style.gap = "4px";
@@ -1930,10 +2185,148 @@ class YedpViewport {
 
     camImportFixRow.append(rxWrap, ryWrap, rzWrap, scWrap);
 
+    // --- NEW: Path Tracer UI ---
+    const ptRow = document.createElement("div");
+    Object.assign(ptRow.style, { display: "flex", flexDirection: "column", gap: "4px", marginTop: "8px", borderTop: "1px solid #333", paddingTop: "8px" });
+    
+    const ptToggleWrap = document.createElement("div");
+    ptToggleWrap.style.display = "flex"; ptToggleWrap.style.justifyContent = "space-between";
+    const lblPt = document.createElement("label");
+    Object.assign(lblPt.style, { cursor: "pointer", display: "flex", gap: "4px", color: "#ffaa00", fontSize: "10px", alignItems: "center", fontWeight: "bold" });
+    const chkPt = document.createElement("input"); 
+    chkPt.type = "checkbox"; chkPt.checked = this.isPathTracingEnabled;
+    chkPt.onchange = (e) => { 
+        this.isPathTracingEnabled = e.target.checked; 
+        this.needsPtReset = true;
+        this.forceUpdateFrame(); 
+    };
+    lblPt.append(chkPt, "Enable Path Tracing (Shaded Pass)");
+    
+    const lblPtSamples = document.createElement("span");
+    lblPtSamples.id = "pt-sample-counter";
+    Object.assign(lblPtSamples.style, { fontSize: "9px", color: "#888", fontFamily: "monospace" });
+    lblPtSamples.innerText = "0 / 32";
+    ptToggleWrap.append(lblPt, lblPtSamples);
+
+    const makePtSlider = (lbl, min, max, def, callback) => {
+        const wrap = document.createElement("div");
+        wrap.style.display = "flex"; wrap.style.gap = "4px"; wrap.style.alignItems = "center";
+        const label = document.createElement("span"); label.innerText = lbl; label.style.fontSize = "9px"; label.style.color = "#888"; label.style.width = "40px";
+        const sld = document.createElement("input"); sld.type = "range"; sld.min = min; sld.max = max; sld.step = "1"; sld.value = def;
+        sld.style.flex = "1";
+        const val = document.createElement("input"); val.type = "number"; val.value = def;
+        Object.assign(val.style, { width: "36px", background: "#111", color: "#fff", border: "1px solid #444", fontSize: "9px", padding: "1px", textAlign: "right" });
+        const sync = (v) => { sld.value = v; val.value = v; callback(parseInt(v)); };
+        sld.oninput = (e) => sync(e.target.value);
+        val.onchange = (e) => sync(e.target.value);
+        wrap.append(label, sld, val);
+        return wrap;
+    };
+
+    const ptPrevSld = makePtSlider("Preview", 1, 256, this.ptPreviewSamples, (v) => { this.ptPreviewSamples = v; this.needsPtReset = true; this.forceUpdateFrame(); });
+    const ptBakeSld = makePtSlider("Bake", 1, 1024, this.ptBakeSamples, (v) => { this.ptBakeSamples = v; });
+
+    ptRow.append(ptToggleWrap, ptPrevSld, ptBakeSld);
+    // ---------------------------
+
+    // UPDATE this append line to include ptRow at the end!
     camCol.content.append(camSettingsRow, fovContainer, clipContainer, camRow1, camRow2, camImportRow, camImportFixRow);
 
     // LIGHTING
     const lightCol = createCollapsible(`${iconLighting} Lighting`, false);
+
+// --- HDRI UI BLOCK ---
+        const hdriRow = document.createElement("div");
+        Object.assign(hdriRow.style, { display: "flex", flexDirection: "column", gap: "4px", marginBottom: "8px", paddingBottom: "8px", borderBottom: "1px solid #333" });
+        
+        const hdriLbl = document.createElement("span");
+        hdriLbl.innerText = "Load HDR:";
+        hdriLbl.style.fontSize = "10px";
+        hdriLbl.style.color = "#00d2ff";
+        
+        const selHdri = document.createElement("select");
+        selHdri.id = "sel-hdri"; // Added ID for the sync button
+        Object.assign(selHdri.style, { width: "100%", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px" });
+        this.availableHdris.forEach(h => selHdri.add(new Option(h, h)));
+        selHdri.onchange = (e) => this.loadHDRI(e.target.value);
+
+
+
+        const toggleRow = document.createElement("div");
+        toggleRow.style.display = "flex"; toggleRow.style.gap = "8px";
+        
+        const lblHdriEn = document.createElement("label");
+        Object.assign(lblHdriEn.style, { cursor: "pointer", display: "flex", gap: "4px", color: "#ccc", fontSize: "9px", alignItems: "center" });
+        const chkHdriEn = document.createElement("input");
+        chkHdriEn.type = "checkbox"; 
+        chkHdriEn.checked = this.isHdriEnabled;
+        chkHdriEn.id = "chk-hdri-en";
+        chkHdriEn.onchange = (e) => { this.isHdriEnabled = e.target.checked; this.updateHDRI(); };
+        lblHdriEn.append(chkHdriEn, "Enable IBL");
+
+        const lblHdriBg = document.createElement("label");
+        Object.assign(lblHdriBg.style, { cursor: "pointer", display: "flex", gap: "4px", color: "#ccc", fontSize: "9px", alignItems: "center" });
+        const chkHdriBg = document.createElement("input"); 
+        chkHdriBg.type = "checkbox"; 
+        chkHdriBg.checked = this.isHdriBgEnabled;
+        chkHdriBg.id = "chk-hdri-bg";
+        chkHdriBg.onchange = (e) => { this.isHdriBgEnabled = e.target.checked; this.updateHDRI(); };
+        lblHdriBg.append(chkHdriBg, "Visible BG");
+        
+        toggleRow.append(lblHdriEn, lblHdriBg);
+        
+        // Add Rotation and Intensity Controls
+        const rotIntRow = document.createElement("div");
+        rotIntRow.style.display = "flex"; rotIntRow.style.gap = "4px"; rotIntRow.style.alignItems = "center";
+
+        const lblRot = document.createElement("span"); 
+        lblRot.innerText = "Rot"; 
+        lblRot.style.fontSize="9px"; 
+        lblRot.style.color="#888";
+
+        const sldRot = document.createElement("input"); 
+        sldRot.type = "range"; 
+        sldRot.id = "sld-hdri-rot";
+        sldRot.min = "0"; 
+        sldRot.max = "360"; 
+        sldRot.value = this.hdriRotation;
+        sldRot.style.flex = "1"; sldRot.style.width = "0";
+
+        const inpRot = document.createElement("input"); 
+        inpRot.type = "number"; 
+        inpRot.id = "inp-hdri-rot";
+        inpRot.step = "1"; 
+        inpRot.value = this.hdriRotation;
+        Object.assign(inpRot.style, { width:"36px", background:"#111", color:"#00d2ff", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right" });
+
+        const syncRot = (v) => { 
+            this.hdriRotation = v; 
+            sldRot.value = v; 
+            inpRot.value = v; 
+            this.updateHDRI(); 
+        };
+
+        sldRot.oninput = (e) => syncRot(e.target.value);
+        inpRot.onchange = (e) => syncRot(parseFloat(e.target.value) || 0);
+        inpRot.addEventListener('keydown', stopEvent); 
+        inpRot.addEventListener('mousedown', stopEvent);
+
+        const lblInt = document.createElement("span"); lblInt.innerText = "Int"; lblInt.style.fontSize="9px"; lblInt.style.color="#888";
+        
+        const inpInt = document.createElement("input"); 
+        inpInt.type = "number"; 
+        inpInt.id = "inp-hdri-int";
+        inpInt.step = "0.1"; 
+        inpInt.value = this.hdriIntensity;
+        Object.assign(inpInt.style, { width:"36px", background:"#111", color:"#00d2ff", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right" });
+        inpInt.onchange = (e) => { this.hdriIntensity = parseFloat(e.target.value) || 1.0; this.updateHDRI(); };
+        inpInt.addEventListener('keydown', stopEvent); inpInt.addEventListener('mousedown', stopEvent);
+
+        rotIntRow.append(lblRot, sldRot, inpRot, lblInt, inpInt);
+        hdriRow.append(hdriLbl, selHdri, toggleRow, rotIntRow);
+        
+        lightCol.content.append(hdriRow, ptRow); // Appending HDRI and Path Tracing here!
+
         const btnAddLight = createBtn("+ Add Light", "#542", "#653");
         btnAddLight.style.flex = "none"; btnAddLight.style.padding = "2px 6px"; btnAddLight.style.fontSize = "9px";
         btnAddLight.onclick = (e) => { e.stopPropagation(); this.addLight(); };
@@ -3680,6 +4073,10 @@ class YedpViewport {
         const totalFrames = this.getWidgetValue("frame_count", 48);
         const fps = this.getWidgetValue("fps", 24);
 
+        // 1. Track exactly where the camera is right now
+        const oldCamPos = this.camera.position.clone();
+        const oldCamRot = this.camera.rotation.clone();
+
         if (this.isPlaying) {
             this.globalTime += delta;
             const totalDuration = totalFrames / fps;
@@ -3695,16 +4092,98 @@ class YedpViewport {
 
             this.evaluateAnimations(this.globalTime);
             this.applyCameraKeyframes(currentFrame / Math.max(1, totalFrames - 1));
+
+            // Force BVH rebuild while animation plays
+            this.needsPtReset = true;
+            this.needsPtBvhUpdate = true;
         }
         
         if (this.controls) this.controls.update();
-        this.renderer.render(this.scene, this.camera);
+
+        // 2. Native Camera Movement Detection (Handles Damping perfectly!)
+        const posDist = this.camera.position.distanceToSquared(oldCamPos);
+        const rotDist = Math.abs(this.camera.rotation.x - oldCamRot.x) + 
+                Math.abs(this.camera.rotation.y - oldCamRot.y) + 
+                Math.abs(this.camera.rotation.z - oldCamRot.z);
+                
+        // Threshold cuts off the invisible damping tail so pathtracing starts instantly
+        const isCameraMoving = posDist > 0.00001 || rotDist > 0.00001;
+
+        if (isCameraMoving || this.isDraggingSlider) {
+            this.needsPtReset = true;
+        }
+
+        // --- THE RENDER DISPATCHER ---
+        const isPTActive = this.isPathTracingEnabled && this.isShadedMode && this.ptRenderer;
+
+        if (isPTActive && !isCameraMoving && !this.isPlaying && !this.isDraggingSlider) {
+            
+            // A. PATH TRACING MODE
+            if (this.needsPtReset) {
+                if (this.needsPtBvhUpdate) {
+                    // NINJA SWAP: Hide UI Gizmos BEFORE giving scene to path tracer
+                    if (this.gridHelper) this.gridHelper.visible = false;
+                    if (this.axesHelper) this.axesHelper.visible = false;
+                    if (this.transformControls) this.transformControls.visible = false;
+                    this.lights.forEach(l => { if (l.helper) l.helper.visible = false; });
+                    
+                    // NINJA SWAP: Temporarily change the transparent WebGL floor to a physical matte material
+                    const origFloorMat = this.floor.material;
+                    if (!this.ptFloorMat) this.ptFloorMat = new this.THREE.MeshStandardMaterial({ color: 0x222222, roughness: 1.0, metalness: 0.0 });
+                    this.floor.material = this.ptFloorMat;
+
+                    // Build the BVH from the clean scene!
+                    this.ptRenderer.setScene(this.scene, this.camera);
+                    
+                    // Put the original WebGL floor back
+                    this.floor.material = origFloorMat;
+                    
+                    this.needsPtBvhUpdate = false;
+                } else {
+                    this.ptRenderer.updateCamera(); 
+                }
+                this.needsPtReset = false;
+            }
+
+            if (this.ptRenderer.samples < this.ptPreviewSamples) {
+                this.ptRenderer.renderSample();
+            }
+
+            const counter = this.container.querySelector("#pt-sample-counter");
+            if (counter) counter.innerText = `${this.ptRenderer.samples.toFixed(1)} / ${this.ptPreviewSamples}`;
+            
+        } else {
+            
+            // B. FAST WEBGL FALLBACK MODE
+            if (isPTActive) {
+                // Instantly unhide UI Gizmos for the WebGL view
+                if (this.gridHelper) this.gridHelper.visible = true;
+                if (this.axesHelper) this.axesHelper.visible = true;
+                if (this.transformControls && this.selected.obj) this.transformControls.visible = true;
+                this.lights.forEach(l => { if (l.helper && l.type !== 'ambient') l.helper.visible = true; });
+                
+                const counter = this.container.querySelector("#pt-sample-counter");
+                if (counter) counter.innerText = `0 / ${this.ptPreviewSamples}`;
+                
+                // Force a reset when motion stops so we don't carry over old noise
+                this.needsPtReset = true; 
+            }
+            
+            this.renderer.render(this.scene, this.camera);
+        }
     }
 
     updateVisibilities() {
         const isDepth = this.isDepthMode;
         const isShaded = this.isShadedMode;
         const isTextured = this.isTexturedMode;
+
+        const isPTActive = this.isPathTracingEnabled && this.isShadedMode;
+        if (this.gridHelper) this.gridHelper.visible = !isPTActive;
+        if (this.axesHelper) this.axesHelper.visible = !isPTActive;
+        if (this.floor) {
+            this.floor.material = isPTActive ? this.matsStatic.shaded : this.floorMat;
+        }
 
         const getMat = (m) => {
             if (isDepth) return m.isPoints ? this.matsStatic.depthPoints : (m.isSkinnedMesh ? this.matsSkinned.depth : this.matsStatic.depth);
@@ -3739,6 +4218,35 @@ class YedpViewport {
 
         if (isDepth) this.updateCameraBounds();
         else this.resetCamera();
+
+        // --- NEW HDRI PROTECTION LOGIC ---
+        if (isShaded || isTextured) {
+            const activeHdriMap = this.hdriRenderTarget ? this.hdriRenderTarget.texture : this.currentHdriMap;
+            this.scene.environment = this.isHdriEnabled ? activeHdriMap : null;
+            this.scene.background = (this.isHdriEnabled && this.isHdriBgEnabled) ? activeHdriMap : new this.THREE.Color(0x000000);
+        } else {
+            this.scene.environment = null;
+            this.scene.background = new this.THREE.Color(0x000000); 
+        }
+
+        // --- NEW: Inject Scene to Path Tracer ---
+        if (this.isPathTracingEnabled && this.isShadedMode && this.ptRenderer) {
+            
+            // 1. Hide ALL helpers so the path tracer doesn't render their shadows
+            if (this.gridHelper) this.gridHelper.visible = false;
+            if (this.axesHelper) this.axesHelper.visible = false;
+            if (this.transformControls) this.transformControls.visible = false;
+            this.lights.forEach(l => { if (l.helper) l.helper.visible = false; });
+            
+            // 2. Feed the clean scene to the path tracer
+            this.ptRenderer.setScene(this.scene, this.camera);
+            this.needsPtReset = true;
+            this.needsPtBvhUpdate = false; 
+            
+            // 3. Turn the Transform gizmo back on for the UI overlay
+            if (this.transformControls) this.transformControls.visible = true;
+        }
+        // ----------------------------------------
     }
 
     updateCameraBounds() {
@@ -3828,7 +4336,8 @@ class YedpViewport {
         const originalBtnText = isSingleFrame ? 'BAKE FRAME' : 'BAKE V9.3';
         const btn = this.container.querySelector(btnId); btn.innerText = "PREPARING...";
         
-        this.isBaking = true; this.isPlaying = false;
+        this.isBaking = true; 
+        this.isPlaying = false;
         
         this.transformControls.detach();
         this.lights.forEach(l => l.helper.visible = false);
@@ -3901,16 +4410,28 @@ class YedpViewport {
                     e.splatViewer.visible = (mode === 'textured');
                 }
             });
+
+            // NEW HDRI PROTECTION LOGIC
+            if (mode === 'shaded' || mode === 'textured') {
+                const activeHdriMap = this.hdriRenderTarget ? this.hdriRenderTarget.texture : this.currentHdriMap;
+                this.scene.environment = this.isHdriEnabled ? activeHdriMap : null;
+                this.scene.background = (this.isHdriEnabled && this.isHdriBgEnabled) ? activeHdriMap : new this.THREE.Color(0x000000);
+            } else {
+                this.scene.environment = null;
+                this.scene.background = new this.THREE.Color(0x000000); 
+            }
             
-            this.scene.background = new THREE.Color(0x000000); 
+            //this.scene.background = new THREE.Color(0x000000); 
         };
 
         const compressCanvas = document.createElement("canvas");
         compressCanvas.width = this.renderWidth; compressCanvas.height = this.renderHeight;
         const compressCtx = compressCanvas.getContext("2d");
 
-        const captureFrame = (array, mimeType = "image/png", quality = undefined) => {
-            this.renderer.render(this.scene, this.camera);
+        const captureFrame = (array, mimeType = "image/png", quality = undefined, skipRender = false) => {
+            if (!skipRender) {
+                this.renderer.render(this.scene, this.camera);
+            }
             this.renderer.getContext().finish(); 
             if (mimeType === "image/jpeg") {
                 compressCtx.fillStyle = "#000000"; compressCtx.fillRect(0, 0, this.renderWidth, this.renderHeight);
@@ -3968,7 +4489,51 @@ class YedpViewport {
             executeMaterialPass('normal', results.normal);
             
             setVisibility('shaded'); this.resetCamera();
-            executeMaterialPass('shaded', results.shaded);
+            
+            if (this.isPathTracingEnabled && this.ptRenderer) {
+                // 1. Swap the floor to the matte physical material (like in animate)
+                const origFloorMat = this.floor.material;
+                if (!this.ptFloorMat) this.ptFloorMat = new this.THREE.MeshStandardMaterial({ color: 0x222222, roughness: 1.0, metalness: 0.0 });
+                this.floor.material = this.ptFloorMat;
+
+                // 2. Temporarily assign shaded materials
+                const restores = [];
+                const applyMat = (m) => {
+                    restores.push({mesh: m, mat: m.material});
+                    if (!m.isPoints) m.material = m.isSkinnedMesh ? this.matsSkinned.shaded : this.matsStatic.shaded;
+                };
+                this.characters.forEach(c => c.activeDepthMeshes.forEach(applyMat));
+                this.environments.forEach(e => e.meshes.forEach(applyMat));
+
+                // 3. Inject scene and bake the Path Traced samples
+                this.ptRenderer.setScene(this.scene, this.camera);
+                
+                let lastUIUpdate = 0;
+                while (this.ptRenderer.samples < this.ptBakeSamples) {
+                    this.ptRenderer.renderSample();
+                    
+                    const currentSample = Math.floor(this.ptRenderer.samples);
+                    // Only yield to the UI when a full new sample is completed
+                    if (currentSample > lastUIUpdate) {
+                        lastUIUpdate = currentSample;
+                        btn.innerText = `PT BAKING ${idx+1}/${framesToRender} [${currentSample}/${this.ptBakeSamples}]`;
+                        
+                        // Yield every 5 samples to keep the UI responsive without throttling the GPU
+                        if (currentSample % 5 === 0) {
+                            await new Promise(r => setTimeout(r, 1)); 
+                        }
+                    }
+                }
+                
+                // 4. Capture frame and restore materials
+                captureFrame(results.shaded, "image/png", undefined, true);
+                restores.forEach(o => o.mesh.material = o.mat);
+                this.floor.material = origFloorMat;
+                
+            } else {
+                // Fallback to normal fast WebGL shading
+                executeMaterialPass('shaded', results.shaded);
+            }
 
             setVisibility('alpha'); this.resetCamera();
             executeMaterialPass('alpha', results.alpha);

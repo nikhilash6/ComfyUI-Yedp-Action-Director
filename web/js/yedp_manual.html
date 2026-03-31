@@ -28,6 +28,12 @@
             margin-top: 20px; 
             font-size: 14px; 
         }
+        .manual-wrapper h5 {
+            color: #00d2ff; 
+            margin-top: 16px; 
+            margin-bottom: 4px;
+            font-size: 12px;
+        }
         .manual-wrapper ul { 
             margin-top: 8px; 
             padding-left: 20px; 
@@ -187,6 +193,22 @@
             <img src="/extensions/ComfyUI-Yedp-Action-Director/js/manual_images/lighting_panel.png" alt="Lighting Panel" style="max-width: 300px;" onerror="this.outerHTML='<div style=\'color:#888; padding:20px;\'>[ Missing Image: lighting_panel.png ]</div>'">
         </div>
 
+        <h5 style="color: #00d2ff; margin-top: 12px; margin-bottom: 4px;">HDRI / Image-Based Lighting</h5>
+        <ul>
+            <li><strong>Load HDR:</strong> Dropdown to load `.hdr` or `.exr` files from your `input/yedp_hdri/` folder.</li>
+            <li><strong>Enable IBL / Visible BG:</strong> Toggles the Image-Based Lighting effect on/off, and sets whether the environment map is visible in the background of your renders.</li>
+            <li><strong>Rot / Int:</strong> Adjust the Rotation (0-360 degrees) and Intensity multiplier of the HDRI map.</li>
+        </ul>
+
+        <h5 style="color: #ffaa00; margin-top: 12px; margin-bottom: 4px;">Path Tracing (Shaded Pass)</h5>
+        <p style="margin-top: 4px; font-size: 11px;">Enables physically accurate ray-bouncing for hyper-realistic shading.</p>
+        <ul>
+            <li><strong>Enable Path Tracing:</strong> When checked in <em>Shaded</em> mode, the viewport will progressively render realistic light bounces and shadows whenever the camera stops moving.</li>
+            <li><strong>Preview Samples:</strong> Determines how many samples accumulate in the live viewport before it stops refining.</li>
+            <li><strong>Bake Samples:</strong> Dictates the final quality target the engine must hit for each frame before it moves on during the baking process. Higher values mean less noise but longer render times.</li>
+        </ul>
+
+        <h5 style="color: #4ade80; margin-top: 12px; margin-bottom: 4px;">Standard Lights</h5>
         <ul>
             <li><strong>+ Add Light:</strong> Spawns a new light source.</li>
             <li><strong>Type:</strong> Switch between Ambient, Directional, Point, and Spot lights.</li>
@@ -270,6 +292,7 @@
             Animations:   input/yedp_anims/ <span>(.glb, .fbx, .bvh)</span><br>
             Environments: input/yedp_envs/ <span>(.glb, .fbx, .obj, .ply)</span><br>
             Cameras:      input/yedp_cams/ <span>(.glb, .fbx)</span><br>
+            HDRI Maps:    input/yedp_hdri/ <span>(.hdr, .exr)</span><br>
             Mocap Data:   input/yedp_mocap/ <span>(.json)</span><br>
             Saved Scenes: input/yedp_scenes/ <span>(.json)</span>
         </div>
