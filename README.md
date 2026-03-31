@@ -32,23 +32,25 @@ https://github.com/user-attachments/assets/9e7d56c9-e2cd-4ff6-a505-93e4eabae959
 
 <img width="105" height="94" alt="image" src="https://github.com/user-attachments/assets/de1eec41-84ea-4c8f-94b3-74e25b3d0ac0" />
 
-## **🚀 What's New in V9.28 (Face Mocap & Sequencer Update)**
+## **🚀 What's New in V9.3 (Path Tracing, HDRI & Workflow Upgrades)**
 
-### **🎭 Facial Motion Capture (MediaPipe)**
-* **Local Web/Video Mocap:** Drive your character's face directly inside the viewport using your Webcam or an uploaded Video file.  
-* **Offline Video Processing:** Video files are processed sequentially frame-by-frame for zero dropped frames and perfect 30 FPS synchronization.  
-* **Smart Auto-Scaling & Local Space:** The engine mathematically calculates the ear-to-ear distance of your 3D rig and proportionally scales your facial performance to fit perfectly. Matrix Un-Rotation ensures expressions are stored in pure local space, completely decoupled from head rotation.
-* **Disk Saving:** Captures are automatically saved as JSON files to your `yedp_mocap` folder for reuse across workflows.
+### **✨ Physically Based Rendering & Lighting**
+* **Path Tracing Engine:** A massive leap in render quality! You can now enable physically accurate ray-bouncing for your Shaded passes. The engine smartly drops back to the lightning-fast WebGL rasterizer while you move the camera or scrub the timeline, then progressively accumulates high-quality path-traced samples the second you stop.
+* **HDRI / Image-Based Lighting (IBL):** Drop .hdr files into your yedp_hdri folder to light your characters and environments with real-world reflections and ambient lighting. Includes real-time rotation, intensity sliders, and visible background toggles.  
 
-### **🎞️ Multi-Clip Animation Sequencer**
-* **Animation Sequencing:** Characters are no longer limited to a single animation clip! You can now queue up an infinite sequence of `.fbx` or `.bvh` files.  
-* **Auto-Crossfading:** The engine automatically calculates overlapping weight blends between your clips for smooth, popping-free transitions.  
-* **Circular Time-Wrapping:** When a character is set to "Loop", the final sequence clip mathematically blends flawlessly back into the first.
-* **Continuous Root Motion Tracking:** Toggle "Root M." to automatically strip loop-snapping and integrate spatial movement indefinitely, allowing characters to walk forward forever.
+### **💾 Scene Management**
+* **Physical Save & Load:** Say goodbye to lost setups if a node gets deleted. You can now serialize and save your entire 3D viewport state (characters, mocap bindings, lighting, environments, and camera keyframes) directly to your hard drive as .json files in the yedp_scenes folder.
 
-### **🌍 Environment & Engine Upgrades**
-* **PLY Support:** Added `PLYLoader` support for Gaussian Splats and Point Clouds, rendering with native vertex colors.
-* **Isotropic Pixel Space:** Switched coordinate extraction to Isotropic Pixel Space to completely eliminate mesh-mangling bugs on non-16:9 video aspect ratios.
+### **🎬 Mocap & Interface Enhancements**
+* **Video Trim Slider:** When importing a video file for facial motion capture, a new dual-handle range slider allows you to trim exactly which segment of the video you want to process, saving you processing time and memory.
+* **Custom Capture Naming:** Added a dedicated input field to name your facial mocap tracks before recording, making it infinitely easier to organize and select them from your binding dropdowns later.
+* **Expanded UI Layout:** Expanded the sidebar width to 280px to give the new features and transform inputs better breathing room without truncating text.
+
+### **🌍 Advanced Environment Support**
+* **Native Gaussian Splatting:** Full support for .ply and .spz files (.splat, .ksplat and .sog format are untested!). Load massive scanned environments directly into the viewport.
+* **Splat-to-Proxy Shadows:** A custom internal shader allows Points Clouds to cast dense, accurate shadows and generate proper Z-Depth maps, making them fully compatible with ControlNet workflows.
+* **Dynamic PLY Toggling:** For .ply files, you can now toggle in real-time between standard Point Cloud rendering and Gaussian Splat mode (Option appearing upon pressing the "Sync Folders" button).
+
 
 ## **📥 Installation**
 
@@ -93,7 +95,7 @@ You have two ways to animate your camera:
 * **Maya/Blender Override:** Import an FBX camera from the `yedp_cams` folder. Adjust the scale/rotation fixes if your 3D software uses different axes, verify it with the cyan ghost proxy, and then check **Override** to lock your viewport to the imported track.
 
 ### **6. Baking**
-Click the **BAKE V9.28** button in the viewport header (or BAKE FRAME for a single test frame). The engine will rapidly generate 7 separate visual passes, temporarily cache them to avoid browser crashes, and output them as image batches directly into your ComfyUI workflow.
+Click the **BAKE V9.3** button in the viewport header (or BAKE FRAME for a single test frame). The engine will rapidly generate 7 separate visual passes, temporarily cache them to avoid browser crashes, and output them as image batches directly into your ComfyUI workflow.
 
 ## **🛠️ Custom Rigging & Prop Setup (For Advanced Users)**
 The parser relies on a specific (but forgiving) naming convention in your node hierarchy. Remember that **Mixamo compatibility** is heavily recommended for best results:
@@ -134,6 +136,10 @@ Yedp-Action-Director is built upon the incredible work of the open-source commun
 
 **🛠️ Core Engine & Libraries**
 Three.js: The backbone of the 3D viewport, including essential modules like GLTFLoader, FBXLoader, BVHLoader, and SkeletonUtils.
+
+Three-GPU-PathTracer (gkjohnson): Powers the high-performance, physically-based path tracing engine for realistic lighting and shadows.
+
+Three-Mesh-BVH (gkjohnson): Essential for spatial acceleration, allowing the engine to handle complex geometry and ray-casting with minimal performance impact.
 
 MediaPipe (Google): Powers the high-performance, local facial motion capture and landmark detection.
 
