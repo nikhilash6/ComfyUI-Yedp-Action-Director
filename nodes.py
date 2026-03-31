@@ -27,6 +27,9 @@ if "yedp_mocap" not in folder_paths.folder_names_and_paths:
 if "yedp_scenes" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_scenes"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_scenes")], {".json"})
 
+if "yedp_hdri" not in folder_paths.folder_names_and_paths:
+    folder_paths.folder_names_and_paths["yedp_hdri"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_hdri")], {".hdr", ".exr"})
+
 # Global Caches for massive payloads
 YEDP_PAYLOAD_CACHE = {}
 YEDP_CHUNKS = {}
@@ -130,6 +133,13 @@ class YedpActionDirector:
         return (pose_batch, depth_batch, canny_batch, normal_batch, shaded_batch, alpha_batch, textured_batch)
 
 # --- API ROUTES ---
+@PromptServer.instance.routes.get("/yedp/get_hdris")
+async def get_hdris(request):
+    files = folder_paths.get_filename_list("yedp_hdri")
+    if not files:
+        files = []
+    return web.json_response({"files": files})
+
 @PromptServer.instance.routes.get("/yedp/get_animations")
 async def get_animations(request):
     files = folder_paths.get_filename_list("yedp_anims")
