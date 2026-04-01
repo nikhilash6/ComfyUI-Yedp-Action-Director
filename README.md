@@ -120,6 +120,7 @@ The parser relies on a specific (but forgiving) naming convention in your node h
 * **"Animation/Environment not found":** Ensure your files are in the correct `input/` subfolders. Click your custom **↻ SYNC FOLDERS** button in the ComfyUI menu if you just added them!
 * **"imported .ply doesn't show":** .ply files are imported as Gaussion Splat by default, if your .ply file are points cloud, make sure to press the **↻ SYNC FOLDERS** button to make the settings appear and uncheck "Render as Gaussian Splat" (currently doesn't show dynamically, hopefully will be fixed in the future!)
  <img width="285" height="144" alt="image" src="https://github.com/user-attachments/assets/53625815-4664-4248-b4f2-7afb2638eb3d" />
+ * **"Path tracing takes a long time to activate after toggled on the first time":** the first time, the GPU has to compile thousands of lines of complex math from scratch. This blocks the main thread and causes that long freeze before the first sample appears.
 
 
 ## **📜 License**
