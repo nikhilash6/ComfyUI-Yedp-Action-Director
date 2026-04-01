@@ -549,12 +549,19 @@ class YedpViewport {
             
             this.scene.traverse((child) => {
                 if (child.isMesh && child.material) {
-                    const updateMat = (mat) => {
-                        if (mat.envMapIntensity !== undefined) mat.envMapIntensity = intensity;
-                        mat.needsUpdate = true;
-                    };
-                    if (Array.isArray(child.material)) child.material.forEach(updateMat);
-                    else updateMat(child.material);
+                    // Shield Gaussian Splats (and other custom shaders) from forced recompilation
+                    const isCustomShader = Array.isArray(child.material) 
+                        ? child.material.some(m => m.isShaderMaterial) 
+                        : child.material.isShaderMaterial;
+
+                    if (!isCustomShader) {
+                        const updateMat = (mat) => {
+                            if (mat.envMapIntensity !== undefined) mat.envMapIntensity = intensity;
+                            mat.needsUpdate = true;
+                        };
+                        if (Array.isArray(child.material)) child.material.forEach(updateMat);
+                        else updateMat(child.material);
+                    }
                 }
             });
 
@@ -582,12 +589,19 @@ class YedpViewport {
 
             this.scene.traverse((child) => {
                 if (child.isMesh && child.material) {
-                    const resetMat = (mat) => {
-                        if (mat.envMapIntensity !== undefined) mat.envMapIntensity = 1.0;
-                        mat.needsUpdate = true;
-                    };
-                    if (Array.isArray(child.material)) child.material.forEach(resetMat);
-                    else resetMat(child.material);
+                    // Shield Gaussian Splats (and other custom shaders) from forced recompilation
+                    const isCustomShader = Array.isArray(child.material) 
+                        ? child.material.some(m => m.isShaderMaterial) 
+                        : child.material.isShaderMaterial;
+
+                    if (!isCustomShader) {
+                        const resetMat = (mat) => {
+                            if (mat.envMapIntensity !== undefined) mat.envMapIntensity = 1.0;
+                            mat.needsUpdate = true;
+                        };
+                        if (Array.isArray(child.material)) child.material.forEach(resetMat);
+                        else resetMat(child.material);
+                    }
                 }
             });
         }
