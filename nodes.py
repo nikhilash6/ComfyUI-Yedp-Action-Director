@@ -132,6 +132,37 @@ class YedpActionDirector:
         print(f"[Yedp] Successfully rendered {len(pose_batch)} frames (7 batches).")
         return (pose_batch, depth_batch, canny_batch, normal_batch, shaded_batch, alpha_batch, textured_batch)
 
+
+class YedpMocapSurgeon:
+    """
+    ComfyUI-Yedp-Mocap-Surgeon
+    Standalone tool for overlaying 3D rigs onto video plates for mocap alignment.
+    This is primarily a visual frontend node.
+    """
+    def __init__(self):
+        self.type = "output"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "info": ("STRING", {"default": "Frontend visualization tool. No backend execution required.", "multiline": True}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            }
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "run"
+    CATEGORY = "Yedp/MoCap"
+    OUTPUT_NODE = True
+
+    def run(self, info="", unique_id=None):
+        # Mocap Surgeon does all its work in the browser, so it just passes through on execution.
+        return ()
+
+
 # --- API ROUTES ---
 @PromptServer.instance.routes.get("/yedp/get_hdris")
 async def get_hdris(request):
@@ -279,3 +310,47 @@ async def get_rigs(request):
         files.insert(0, "Yedp_Rig.glb")
         
     return web.json_response({"files": files})
+
+
+# --- MOCAP GLB EXPORT ROUTE ---
+@PromptServer.instance.routes.post("/action_director/upload_glb")
+async def upload_glb(request):
+    """
+    Receives a GLB Blob from the Mocap Surgeon node and saves it directly to the yedp_anims input folder.
+    Uses multipart streaming to ensure memory safety for large binary files.
+    """
+    try:
+        reader = await request.multipart()
+        filename = "Yedp_Clean_Mocap.glb"
+        file_data = None
+        
+        async for field in reader:
+            if field.name == 'filename':
+                filename_bytes = await field.read()
+                filename = filename_bytes.decode('utf-8')
+            elif field.name == 'file':
+                file_data = await field.read()
+        
+        if file_data is None:
+            return web.json_response({"status": "error", "message": "No file data received"}, status=400)
+        
+        # Sanitize filename to prevent path traversal issues
+        safe_name = "".join([c for c in filename if c.isalnum() or c in [' ', '_', '-']]).rstrip()
+        if not safe_name.lower().endswith('.glb'):
+            safe_name += ".glb"
+            
+        anim_dir = folder_paths.folder_names_and_paths["yedp_anims"][0][0]
+        os.makedirs(anim_dir, exist_ok=True)
+        
+        file_path = os.path.join(anim_dir, safe_name)
+        
+        # Context manager automatically ensures the file is closed tightly, preventing leaks
+        with open(file_path, "wb") as f:
+            f.write(file_data)
+            
+        print(f"[Yedp] Successfully baked and saved GLB animation to {file_path}")
+        return web.json_response({"status": "success", "file": safe_name})
+        
+    except Exception as e:
+        print(f"[Yedp] Failed to upload GLB: {e}")
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
