@@ -4613,21 +4613,32 @@ class YedpViewport {
             // 1. Generate a unique payload ID for this session
             const payloadId = `yedp_payload_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
             
-            // 2. Upload each visual pass as an individual chunk to avoid aiohttp limits
+            // 2. Upload each visual pass as smaller individual chunks to stay under 100MB limits safely
             const passNames = Object.keys(results);
+            const CHUNK_SIZE = 50; // Batch frames by 50 to easily dodge the HTTP 413 error limit
+
             for (let i = 0; i < passNames.length; i++) {
                 const passName = passNames[i];
-                if (btn) btn.innerText = `UPLOADING PASS ${i + 1}/${passNames.length}`;
-                
-                await api.fetchApi("/yedp/upload_payload_chunk", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        payload_id: payloadId,
-                        pass: passName,
-                        frames: results[passName]
-                    })
-                });
+                const frames = results[passName];
+                const totalChunks = Math.ceil(frames.length / CHUNK_SIZE);
+
+                for (let j = 0; j < totalChunks; j++) {
+                    if (btn) {
+                        btn.innerText = `UPLOADING PASS ${i + 1}/${passNames.length} (Batch ${j + 1}/${totalChunks})`;
+                    }
+                    
+                    const chunkFrames = frames.slice(j * CHUNK_SIZE, (j + 1) * CHUNK_SIZE);
+                    
+                    await api.fetchApi("/yedp/upload_payload_chunk", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            payload_id: payloadId,
+                            pass: passName,
+                            frames: chunkFrames
+                        })
+                    });
+                }
             }
 
             // 3. Tell Python we are done and receive the final payload ID for the node execution
