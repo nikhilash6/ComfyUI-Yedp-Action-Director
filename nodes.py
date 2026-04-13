@@ -265,6 +265,7 @@ async def save_scene(request):
 async def upload_payload_chunk(request):
     """
     Receives individual render passes to prevent reaching the 100MB aiohttp size limit.
+    Now supports chunking inside the passes using list extension.
     """
     data = await request.json()
     payload_id = data.get("payload_id")
@@ -275,7 +276,12 @@ async def upload_payload_chunk(request):
     if payload_id not in YEDP_CHUNKS:
         YEDP_CHUNKS[payload_id] = {}
         
-    YEDP_CHUNKS[payload_id][pass_name] = frames
+    if pass_name not in YEDP_CHUNKS[payload_id]:
+        YEDP_CHUNKS[payload_id][pass_name] = []
+        
+    # Crucial Fix: Extend the existing array instead of overwriting it
+    YEDP_CHUNKS[payload_id][pass_name].extend(frames)
+    
     return web.json_response({"status": "ok"})
 
 
