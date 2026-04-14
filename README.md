@@ -56,7 +56,7 @@ https://github.com/user-attachments/assets/9e7d56c9-e2cd-4ff6-a505-93e4eabae959
 
 1. **Clone the repository** into your ComfyUI custom nodes directory:  
    cd ComfyUI/custom\_nodes/  
-   git clone https://github.com/YourUsername/ComfyUI-Yedp-Action-Director.git  
+   git clone https://github.com/yedp123/ComfyUI-Yedp-Action-Director.git  
 2. **Install Dependencies:** No external Python dependencies are required beyond standard ComfyUI requirements. The frontend libraries (Three.js and MediaPipe) are loaded dynamically.  
 3. **Add Animations & Assets:** Create the following folders inside your ComfyUI input directory and place your files accordingly:  
    * **Characters:** ComfyUI/input/yedp\_anims/  
