@@ -573,14 +573,44 @@ class MocapSurgeonViewport {
                 }
             });
 
-            // Hotkeys: W (Translate) / E (Rotate)
+            // NEW: Update numbers while dragging the Gizmo
+            this.transformControls.addEventListener('change', () => {
+                this.updateTransformPanelUI();
+            });
+
+            // Hotkeys: G (Translate) / R (Rotate) & Frame Stepping
             this.container.addEventListener('keydown', (e) => {
+                
+                // 1. Frame Stepping Logic (Left/Right Arrows or Comma/Period)
+                if (e.key === 'ArrowLeft' || e.key === ',') {
+                    if (this.videoEl) {
+                        if (!this.videoEl.paused) this.videoEl.pause();
+                        this.videoEl.currentTime = Math.max(0, this.videoEl.currentTime - (1/30));
+                        
+                        // Sync serialization so ComfyUI remembers where you parked
+                        this.node.properties.scrubbedTime = this.videoEl.currentTime;
+                        this.node.properties.scrubbedFrame = Math.round(this.videoEl.currentTime * 30);
+                    }
+                    return; // Stop execution so it doesn't trigger Gizmo logic
+                }
+                if (e.key === 'ArrowRight' || e.key === '.') {
+                    if (this.videoEl) {
+                        if (!this.videoEl.paused) this.videoEl.pause();
+                        this.videoEl.currentTime = Math.min(this.videoEl.duration || Number.MAX_VALUE, this.videoEl.currentTime + (1/30));
+                        
+                        this.node.properties.scrubbedTime = this.videoEl.currentTime;
+                        this.node.properties.scrubbedFrame = Math.round(this.videoEl.currentTime * 30);
+                    }
+                    return;
+                }
+
+                // 2. Transform Gizmo Hotkeys
                 if (!this.transformControls || !this.transformControls.object) return;
                 
-                if (e.key === 'e' || e.key === 'E') {
+                if (e.key === 'r' || e.key === 'R') {
                     this.transformControls.setMode('rotate');
                     this.transformControls.setSpace('local');
-                } else if (e.key === 'w' || e.key === 'W') {
+                } else if (e.key === 'g' || e.key === 'G') {
                     if (this.selectedMpIdx == 99) { // Lock translation to Hips only
                         this.transformControls.setMode('translate');
                         this.transformControls.setSpace('world');
@@ -623,9 +653,16 @@ class MocapSurgeonViewport {
                         this.transformControls.setMode('rotate');
                         this.transformControls.setSpace('local'); 
                     }
+
+                    // NEW: Show panel when clicked
+                    this.updateTransformPanelUI();
+
                 } else {
                     this.transformControls.detach();
                     this.selectedMpIdx = null;
+
+                    // NEW: Hide panel when clicking empty space
+                    this.updateTransformPanelUI();
                 }
             });
 
@@ -899,7 +936,21 @@ class MocapSurgeonViewport {
         this.timelineSlider.step = 0.01;
         this.timelineSlider.value = 0;
         this.timelineSlider.className = "mocap-theme-slider"; // Themed slider
-        Object.assign(this.timelineSlider.style, { flexGrow: "1" });
+        Object.assign(this.timelineSlider.style, { width: "100%", margin: "0", zIndex: "2", position: "relative" });
+
+        // --- NEW: SLIDER WRAPPER & TICKS CONTAINER ---
+        this.sliderWrap = document.createElement("div");
+        Object.assign(this.sliderWrap.style, { 
+            position: "relative", flexGrow: "1", display: "flex", alignItems: "center", height: "20px" 
+        });
+
+        this.ticksContainer = document.createElement("div");
+        Object.assign(this.ticksContainer.style, {
+            position: "absolute", left: "0", top: "0", width: "100%", height: "100%", pointerEvents: "none", zIndex: "1"
+        });
+
+        this.sliderWrap.append(this.ticksContainer, this.timelineSlider);
+
         
         // Scrubbing Event Triggers (Saves to ComfyUI node properties)
         this.timelineSlider.oninput = (e) => {
@@ -917,7 +968,7 @@ class MocapSurgeonViewport {
             this.isScrubbing = false; // Scrubbing finished
         };
 
-        timelineRow.append(this.timeLabel, this.timelineSlider);
+        timelineRow.append(this.timeLabel, this.sliderWrap);
 
         // --- Bottom Row 4: Exporter ---
         const exportRow = document.createElement("div");
@@ -960,6 +1011,52 @@ class MocapSurgeonViewport {
         uiPanel.append(controlsRow1, controlsRow2, timelineRow, exportRow);
         this.container.appendChild(uiPanel);
 
+        // --- NEW: RIGHT TRANSFORM PANEL ---
+        this.transformPanelEl = document.createElement("div");
+        Object.assign(this.transformPanelEl.style, {
+            position: "absolute", right: "16px", top: "50%", transform: "translateY(-50%)",
+            display: "none", flexDirection: "column", gap: "8px", background: "rgba(20, 20, 20, 0.85)",
+            padding: "12px", borderRadius: "8px", border: "1px solid #444", zIndex: "10", backdropFilter: "blur(4px)"
+        });
+
+        const panelTitle = document.createElement("div");
+        panelTitle.innerText = "Transform";
+        Object.assign(panelTitle.style, { color: "#00d2ff", fontSize: "12px", fontWeight: "bold", textAlign: "center", marginBottom: "4px" });
+        this.transformPanelEl.appendChild(panelTitle);
+
+        this.uiTransformInputs = {};
+
+        const buildTransformRow = (labelStr, keys) => {
+            const row = document.createElement("div");
+            Object.assign(row.style, { display: "flex", gap: "4px", alignItems: "center" });
+            const lbl = document.createElement("span");
+            lbl.innerText = labelStr;
+            Object.assign(lbl.style, { color: "#888", fontSize: "11px", width: "25px" });
+            row.appendChild(lbl);
+
+            keys.forEach(k => {
+                const inp = document.createElement("input");
+                inp.type = "number"; inp.step = k.startsWith('p') ? "0.01" : "1";
+                Object.assign(inp.style, { width: "45px", background: "#111", color: "#fff", border: "1px solid #555", borderRadius: "3px", fontSize: "11px", padding: "2px", textAlign: "right" });
+                
+                // Prevent ComfyUI from capturing keystrokes while typing
+                inp.addEventListener('keydown', e => e.stopPropagation());
+                inp.addEventListener('keyup', e => e.stopPropagation());
+                
+                // When user types a number, apply it immediately
+                inp.onchange = () => this.applyManualTransformFromUI();
+                
+                this.uiTransformInputs[k] = inp;
+                row.appendChild(inp);
+            });
+            return row;
+        };
+
+        this.transformPanelEl.appendChild(buildTransformRow("Pos", ['px', 'py', 'pz']));
+        this.transformPanelEl.appendChild(buildTransformRow("Rot", ['rx', 'ry', 'rz']));
+        this.container.appendChild(this.transformPanelEl);
+     
+
         // UI Events
         btnLoad.onclick = () => fileInput.click();
         
@@ -969,6 +1066,7 @@ class MocapSurgeonViewport {
             
             // NEW: Clean up previous motion data globally so the new video starts completely fresh
             this.motionData = {};
+            if (this.ticksContainer) this.ticksContainer.innerHTML = ""; // NEW: Clear visual ticks
             this.boneFilters = {};
             this.hipsPosFilter = null;
             this.baseFaceLandmarks = null;
@@ -1198,6 +1296,89 @@ class MocapSurgeonViewport {
         }
     }
 
+    // --- NEW: TRANSFORM PANEL LOGIC ---
+    updateTransformPanelUI() {
+        if (!this.selectedMpIdx || !this.mocapBones[this.selectedMpIdx]) {
+            if (this.transformPanelEl) this.transformPanelEl.style.display = "none";
+            return;
+        }
+        
+        if (this.transformPanelEl) this.transformPanelEl.style.display = "flex";
+        
+        const bone = this.mocapBones[this.selectedMpIdx];
+        const ui = this.uiTransformInputs;
+        if (!ui || !ui.px) return;
+
+        // Update Position Inputs
+        ui.px.value = bone.position.x.toFixed(3);
+        ui.py.value = bone.position.y.toFixed(3);
+        ui.pz.value = bone.position.z.toFixed(3);
+
+        // Update Rotation Inputs (Converted from Quaternion to Euler Degrees)
+        const euler = new this.THREE.Euler().setFromQuaternion(bone.quaternion);
+        ui.rx.value = this.THREE.MathUtils.radToDeg(euler.x).toFixed(1);
+        ui.ry.value = this.THREE.MathUtils.radToDeg(euler.y).toFixed(1);
+        ui.rz.value = this.THREE.MathUtils.radToDeg(euler.z).toFixed(1);
+        
+        // Lock translation fields if it's not the Hips
+        const isHips = (this.selectedMpIdx == 99);
+        ui.px.disabled = !isHips; ui.py.disabled = !isHips; ui.pz.disabled = !isHips;
+        ui.px.style.opacity = isHips ? "1.0" : "0.3";
+        ui.py.style.opacity = isHips ? "1.0" : "0.3";
+        ui.pz.style.opacity = isHips ? "1.0" : "0.3";
+    }
+
+    applyManualTransformFromUI() {
+        if (!this.selectedMpIdx || !this.mocapBones[this.selectedMpIdx]) return;
+        
+        const bone = this.mocapBones[this.selectedMpIdx];
+        const ui = this.uiTransformInputs;
+        
+        if (this.selectedMpIdx == 99) { // Only allow position changes for Hips
+            bone.position.set(parseFloat(ui.px.value)||0, parseFloat(ui.py.value)||0, parseFloat(ui.pz.value)||0);
+        }
+        
+        // Convert Euler Degrees back to Quaternion
+        const rx = this.THREE.MathUtils.degToRad(parseFloat(ui.rx.value)||0);
+        const ry = this.THREE.MathUtils.degToRad(parseFloat(ui.ry.value)||0);
+        const rz = this.THREE.MathUtils.degToRad(parseFloat(ui.rz.value)||0);
+        bone.quaternion.setFromEuler(new this.THREE.Euler(rx, ry, rz));
+        
+        bone.updateMatrixWorld(true);
+        this.saveManualEdit(); // Trigger your built-in Slerp bake!
+    }
+
+    // --- NEW: TIMELINE TICKS LOGIC ---
+    updateTimelineTicks() {
+        if (!this.ticksContainer || !this.videoEl || isNaN(this.videoEl.duration) || this.videoEl.duration === 0) return;
+
+        this.ticksContainer.innerHTML = ""; // Clear existing ticks
+
+        const totalFrames = Math.round(this.videoEl.duration * 30);
+        if (totalFrames <= 0) return;
+
+        for (const [frameStr, data] of Object.entries(this.motionData)) {
+            if (data && data.hasManualEdits) {
+                const fIdx = parseInt(frameStr);
+                const percent = (fIdx / totalFrames) * 100;
+
+                const tick = document.createElement("div");
+                Object.assign(tick.style, {
+                    position: "absolute",
+                    left: `${percent}%`,
+                    top: "14px", // Sit exactly under the slider track
+                    width: "2px",
+                    height: "6px",
+                    backgroundColor: "#ffa500", // Matches the orange EDITED tag
+                    transform: "translateX(-50%)",
+                    borderRadius: "1px"
+                });
+                this.ticksContainer.appendChild(tick);
+            }
+        }
+    }
+   
+
     // --- MANUAL EDIT BLENDER ALGORITHM ---
     saveManualEdit() {
         if (!this.selectedMpIdx || this.currentFrameIndex === null) return;
@@ -1278,6 +1459,8 @@ class MocapSurgeonViewport {
 
         performBlend(1);  // Forward Slerp
         performBlend(-1); // Backward Slerp
+
+        this.updateTimelineTicks(); // NEW: Draw the tick mark
     }
 
     syncCamera() {
