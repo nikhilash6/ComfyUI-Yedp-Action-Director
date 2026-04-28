@@ -259,8 +259,8 @@ class MocapSurgeonViewport {
         this.upperBodyOnly = false; // Upper Body Stabilization Toggle
         
         // --- 1€ Filter States ---
-        this.filterMinCutoff = 1.0;
-        this.filterBeta = 0.0;
+        this.filterMinCutoff = 0.01;
+        this.filterBeta = 20.0;
         
         // Post-Math Rotation Filters
         this.boneFilters = {}; 
@@ -837,8 +837,8 @@ class MocapSurgeonViewport {
         this.btnPlay = createBtn("▶ Play", "#2d5a27");
 
         // UI FIX: Descriptive names for 1Euro Filter parameters
-        const sldCutoff = buildSlider("Jitter Reduction:", 0.001, 5.0, 0.01, 1.0, v => this.filterMinCutoff = v);
-        const sldBeta = buildSlider("Speed Responsiveness:", 0.0, 1.0, 0.001, 0.0, v => this.filterBeta = v);
+        const sldCutoff = buildSlider("Jitter Reduction:", 0.001, 5.0, 0.01, 0.01, v => this.filterMinCutoff = v);
+        const sldBeta = buildSlider("Speed Responsiveness:", 0.0, 50.0, 0.1, 20.0, v => this.filterBeta = v);
 
         // --- Visual Toggles (Moved to Top Panel) ---
         const tglOpenPose = buildToggle("OpenPose Proxy", this.showOpenPose, (v) => {
@@ -1389,8 +1389,17 @@ class MocapSurgeonViewport {
     // --- NEW: RAW LANDMARK PRE-SMOOTHING ---
     // Heavily filters the raw point clouds before any cross-products or math to stop 
     // normals (like torsoForward or palmUp) from flipping wildly.
-    filterLandmarks(landmarks, filtersArray, timestamp) {
+    filterLandmarks(landmarks, filtersArray, timestamp, customCutoff = this.filterMinCutoff, customBeta = this.filterBeta) {
         if (!landmarks) return null;
+        
+        // HARD BYPASS: If customCutoff is -1, skip all math and return raw data instantly
+        if (customCutoff === -1) {
+            return landmarks.map(lm => ({
+                x: lm.x, y: lm.y, z: lm.z,
+                visibility: lm.visibility !== undefined ? lm.visibility : 1.0
+            }));
+        }
+
         let smoothed = [];
         for (let i = 0; i < landmarks.length; i++) {
             let lm = landmarks[i];
@@ -1401,8 +1410,8 @@ class MocapSurgeonViewport {
                 filtersArray[i] = new OneEuroFilter3D(30);
             }
             
-            // Filter x, y, z individually using current Cutoff & Beta from UI
-            let f = filtersArray[i].filter({x: lm.x, y: lm.y, z: lm.z}, timestamp, this.filterMinCutoff, this.filterBeta);
+            // Filter x, y, z individually using allowed custom bypass values
+            let f = filtersArray[i].filter({x: lm.x, y: lm.y, z: lm.z}, timestamp, customCutoff, customBeta);
             
             smoothed[i] = {
                 x: f.x,
@@ -1561,7 +1570,7 @@ class MocapSurgeonViewport {
 
     // 3B. "Swing" Execution: Exclusively for fingers and appendages with baked-in native rolls. 
     // Mathematically calculates the shortest-path rotation to the target while strictly preserving the bone's rest-pose roll.
-    boneSwingAtDir(mpIdx, bone, dirVector, timestamp) {
+    boneSwingAtDir(mpIdx, bone, dirVector, timestamp, customCutoff = this.filterMinCutoff, customBeta = this.filterBeta) {
         if (!bone || !dirVector) return;
         
         if (!this.boneFilters[mpIdx]) {
@@ -1595,8 +1604,13 @@ class MocapSurgeonViewport {
         }
         let targetLocalQ = parentGlobalQ.invert().multiply(targetGlobalQ);
 
-        // 6. Filter and apply
-        let fq = this.boneFilters[mpIdx].filter(targetLocalQ, timestamp, this.filterMinCutoff, this.filterBeta);
+        // 6. Filter and apply (with Hard Bypass for zero delay)
+        let fq;
+        if (customCutoff === -1) {
+            fq = { x: targetLocalQ.x, y: targetLocalQ.y, z: targetLocalQ.z, w: targetLocalQ.w }; 
+        } else {
+            fq = this.boneFilters[mpIdx].filter(targetLocalQ, timestamp, customCutoff, customBeta);
+        }
         
         if (!isNaN(fq.x)) {
             // SLERP POPPING FIX
@@ -1646,7 +1660,7 @@ class MocapSurgeonViewport {
     }
 
     // NEW: Additive Logic Execution for the Face. Captures MP local offset, Filters it, and translates the 3D Rest bone.
-    bonePositionDelta(mpIdx, bone, dx, dy, dz, timestamp) {
+    bonePositionDelta(mpIdx, bone, dx, dy, dz, timestamp, customCutoff = this.filterMinCutoff, customBeta = this.filterBeta) {
         if (!bone) return;
         
         if (!this.boneFilters[mpIdx]) {
@@ -1655,7 +1669,14 @@ class MocapSurgeonViewport {
         
         // Apply MP offset entirely locally to its original rest setup
         let targetPos = bone.userData.restPosition.clone().add(new this.THREE.Vector3(dx, dy, dz));
-        let fPos = this.boneFilters[mpIdx].filter(targetPos, timestamp, this.filterMinCutoff, this.filterBeta);
+        
+        // Hard Bypass for zero delay
+        let fPos;
+        if (customCutoff === -1) {
+            fPos = { x: targetPos.x, y: targetPos.y, z: targetPos.z }; 
+        } else {
+            fPos = this.boneFilters[mpIdx].filter(targetPos, timestamp, customCutoff, customBeta);
+        }
         
         if (!isNaN(fPos.x)) {
             // SLERP POPPING FIX
@@ -2024,9 +2045,9 @@ class MocapSurgeonViewport {
                             const rawHand2DPose = this.currentHands.landmarks[h];
                             const handedness = this.currentHands.handednesses[h][0].categoryName; // "Left" or "Right"
                             
-                            // PRE-SMOOTH RAW HAND POINTS
-                            const handWorldPose = this.filterLandmarks(rawHandWorldPose, this.handWorldFilters[handedness], currentTimeSec);
-                            const hand2DPose = this.filterLandmarks(rawHand2DPose, this.hand2DFilters[handedness], currentTimeSec);
+                            // PRE-SMOOTH RAW HAND POINTS (Hard bypass for instant hands)
+                            const handWorldPose = this.filterLandmarks(rawHandWorldPose, this.handWorldFilters[handedness], currentTimeSec, 3, 0.0);
+                            const hand2DPose = this.filterLandmarks(rawHand2DPose, this.hand2DFilters[handedness], currentTimeSec, 3, 0.0);
                             
                             if (hand2DPose) this.smoothedHands2D.push(hand2DPose);
 
@@ -2054,7 +2075,7 @@ class MocapSurgeonViewport {
                             if (dict && handWorldPose) {
                                 for(let finger of dict) {
                                     const dir = this.getDirectionVector(handWorldPose[finger.p1], handWorldPose[finger.p2]);
-                                    this.boneSwingAtDir(finger.id, this.mocapBones[finger.id], dir, currentTimeSec);
+                                    this.boneSwingAtDir(finger.id, this.mocapBones[finger.id], dir, currentTimeSec);this.boneSwingAtDir(finger.id, this.mocapBones[finger.id], dir, currentTimeSec, 3.0, 0.0);
                                 }
                             }
                         }
@@ -2066,8 +2087,8 @@ class MocapSurgeonViewport {
                     if (this.trackFace && this.currentFrameIndex > 2 && this.currentFace && this.currentFace.faceLandmarks && this.currentFace.faceLandmarks.length > 0) {
                         const currentFaceLm = this.currentFace.faceLandmarks[0];
                         
-                        // PRE-SMOOTH 2D FACE POINTS FOR UI RENDERING & STABLE MATH
-                        this.smoothedFace2D = this.filterLandmarks(currentFaceLm, this.face2DFilters, currentTimeSec);
+                        // PRE-SMOOTH 2D FACE POINTS (Bypass heavy smoothing for snappy face expressions)
+                        this.smoothedFace2D = this.filterLandmarks(currentFaceLm, this.face2DFilters, currentTimeSec, -1.0, 0.0);
 
                         const vw = this.videoEl.videoWidth || 640;
                         const vh = this.videoEl.videoHeight || 480;
@@ -2118,7 +2139,7 @@ class MocapSurgeonViewport {
                                     const dy = -(currLm.y - baseLm.y) * scaleY; 
                                     const dz = -(currLm.z - baseLm.z) * scaleX;
                                     
-                                    this.bonePositionDelta(300 + i, this.mocapBones[300 + i], dx, dy, dz, currentTimeSec);
+                                    this.bonePositionDelta(300 + i, this.mocapBones[300 + i], dx, dy, dz, currentTimeSec, -1.0, 0.0);
                                 }
                             }
                         }
