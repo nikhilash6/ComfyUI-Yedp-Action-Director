@@ -257,6 +257,9 @@ class MocapSurgeonViewport {
         this.trackFace = false; // Isolated Face Toggle
         this.trackHands = false; // Isolated Hands Toggle
         this.upperBodyOnly = false; // Upper Body Stabilization Toggle
+        this.showOnionSkin = false;
+        this.onionSkinLayers = 2; // Default to 2 frames before & after
+        this.onionSkinStep = 3;   // Default to 3 frames between layers
         
         // --- 1€ Filter States ---
         this.filterMinCutoff = 0.01;
@@ -404,6 +407,8 @@ class MocapSurgeonViewport {
             this.TransformControlsClass = libs.TransformControls;
             this.GLTFExporterClass = libs.GLTFExporter;
 
+            
+
             // Geometry Tools
             this.raycaster = new this.THREE.Raycaster();
             // Give the raycaster a slight buffer for easier picking
@@ -467,6 +472,8 @@ class MocapSurgeonViewport {
             `;
             this.container.appendChild(style);
 
+            
+
             // Video Background
             this.videoEl = document.createElement("video");
             Object.assign(this.videoEl.style, {
@@ -511,6 +518,9 @@ class MocapSurgeonViewport {
 
             // --- 2. 3D ENGINE SETUP ---
             this.scene = new this.THREE.Scene();
+
+            this.onionGroup = new this.THREE.Group();
+            
             
             // --- NEW: LIGHTING SETUP FOR MESH VOLUME ---
             const ambientLight = new this.THREE.AmbientLight(0xffffff, 0.4);
@@ -578,40 +588,61 @@ class MocapSurgeonViewport {
                 this.updateTransformPanelUI();
             });
 
-            // Hotkeys: G (Translate) / R (Rotate) & Frame Stepping
+            // Hotkeys: Frame Stepping, Premiere Range Selection & Gizmo 
             this.container.addEventListener('keydown', (e) => {
                 
-                // 1. Frame Stepping Logic (Left/Right Arrows or Comma/Period)
+                // 1. Frame Stepping Logic
                 if (e.key === 'ArrowLeft' || e.key === ',') {
                     if (this.videoEl) {
                         if (!this.videoEl.paused) this.videoEl.pause();
                         this.videoEl.currentTime = Math.max(0, this.videoEl.currentTime - (1/30));
-                        
-                        // Sync serialization so ComfyUI remembers where you parked
                         this.node.properties.scrubbedTime = this.videoEl.currentTime;
                         this.node.properties.scrubbedFrame = Math.round(this.videoEl.currentTime * 30);
                     }
-                    return; // Stop execution so it doesn't trigger Gizmo logic
+                    return; 
                 }
                 if (e.key === 'ArrowRight' || e.key === '.') {
                     if (this.videoEl) {
                         if (!this.videoEl.paused) this.videoEl.pause();
                         this.videoEl.currentTime = Math.min(this.videoEl.duration || Number.MAX_VALUE, this.videoEl.currentTime + (1/30));
-                        
                         this.node.properties.scrubbedTime = this.videoEl.currentTime;
                         this.node.properties.scrubbedFrame = Math.round(this.videoEl.currentTime * 30);
                     }
                     return;
                 }
 
-                // 2. Transform Gizmo Hotkeys
+                // 2. Premiere-style In/Out Range Selection
+                if (e.key === 'i' || e.key === 'I') {
+                    this.markInFrame = this.currentFrameIndex;
+                    this.updateRangeHighlight();
+                    return;
+                }
+                if (e.key === 'o' || e.key === 'O') {
+                    this.markOutFrame = this.currentFrameIndex;
+                    this.updateRangeHighlight();
+                    return;
+                }
+                if (e.key === 'Escape') {
+                    this.markInFrame = null;
+                    this.markOutFrame = null;
+                    this.updateRangeHighlight();
+                    return;
+                }
+
+                // 3. Delete Data Hotkey (Safe from ComfyUI Node Deletion!)
+                if (e.key === 'd' || e.key === 'D') {
+                    this.deleteData();
+                    return;
+                }
+
+                // 4. Transform Gizmo Hotkeys
                 if (!this.transformControls || !this.transformControls.object) return;
                 
                 if (e.key === 'r' || e.key === 'R') {
                     this.transformControls.setMode('rotate');
                     this.transformControls.setSpace('local');
                 } else if (e.key === 'g' || e.key === 'G') {
-                    if (this.selectedMpIdx == 99) { // Lock translation to Hips only
+                    if (this.selectedMpIdx == 99) { 
                         this.transformControls.setMode('translate');
                         this.transformControls.setSpace('world');
                     }
@@ -896,7 +927,18 @@ class MocapSurgeonViewport {
 
         const tglMP = buildToggle("MP Points", this.showMPPoints, (v) => this.showMPPoints = v);
         
-        topPanel.append(tglGeoDepth, tglOpenPose, tglSkeleton, tglMP);
+        const sep = document.createElement("div");
+        sep.innerText = " | ";
+        Object.assign(sep.style, { color: "#666", margin: "0 8px", fontWeight: "bold" });
+
+        const tglOnion = buildToggle("Onion Skin", this.showOnionSkin, (v) => this.showOnionSkin = v);
+        tglOnion.style.color = "#00d2ff"; // Highlight it in Cyan!
+        
+        const sldOnionLayers = buildSlider("Layers:", 1, 5, 1, 2, v => this.onionSkinLayers = v);
+        const sldOnionStep = buildSlider("Step:", 1, 10, 1, 3, v => this.onionSkinStep = v);
+
+        topPanel.append(tglGeoDepth, tglOpenPose, tglSkeleton, tglMP, sep, tglOnion, sldOnionLayers, sldOnionStep);
+
         this.container.appendChild(topPanel);
 
         // --- Bottom Row 1: Workflow & Sliders ---
@@ -918,6 +960,22 @@ class MocapSurgeonViewport {
         const tglHands = buildToggle("Hands", this.trackHands, (v) => this.trackHands = v);
         tglHands.style.color = "#ffb020";
         controlsRow2.append(tglUpper, tglHands, tglFace);
+
+        // --- NEW: RANGE & DELETE BUTTONS ---
+        const rangeRow = document.createElement("div");
+        Object.assign(rangeRow.style, { display: "flex", width: "100%", gap: "8px", justifyContent: "center", marginTop: "4px" });
+        
+        const btnIn = createBtn("❲ Set IN (I)", "#006699");
+        const btnOut = createBtn("Set OUT (O) ❳", "#006699");
+        const btnDel = createBtn("🗑️ Delete Data (D)", "#aa0000");
+        
+        btnIn.onclick = () => { this.markInFrame = this.currentFrameIndex; this.updateRangeHighlight(); };
+        btnOut.onclick = () => { this.markOutFrame = this.currentFrameIndex; this.updateRangeHighlight(); };
+        // Clear is handled naturally by setting In/Out to the same frame, or pressing Esc
+        btnDel.onclick = () => this.deleteData();
+        
+        rangeRow.append(btnIn, btnOut, btnDel);
+    
 
         // --- Bottom Row 3: Timeline Scrubber ---
         const timelineRow = document.createElement("div");
@@ -948,6 +1006,15 @@ class MocapSurgeonViewport {
         Object.assign(this.ticksContainer.style, {
             position: "absolute", left: "0", top: "0", width: "100%", height: "100%", pointerEvents: "none", zIndex: "1"
         });
+
+        // --- NEW: RANGE HIGHLIGHT BOX ---
+        this.rangeHighlight = document.createElement("div");
+        Object.assign(this.rangeHighlight.style, {
+            position: "absolute", left: "0%", width: "0%", top: "6px", height: "8px",
+            backgroundColor: "rgba(0, 210, 255, 0.4)", border: "1px solid #00d2ff",
+            borderRadius: "2px", pointerEvents: "none", display: "none", zIndex: "0"
+        });
+        this.ticksContainer.appendChild(this.rangeHighlight);
 
         this.sliderWrap.append(this.ticksContainer, this.timelineSlider);
 
@@ -1008,7 +1075,7 @@ class MocapSurgeonViewport {
         exportRow.append(glbNameInput, btnExport);
 
         // Build Bottom Panel
-        uiPanel.append(controlsRow1, controlsRow2, timelineRow, exportRow);
+        uiPanel.append(controlsRow1, controlsRow2, rangeRow, timelineRow, exportRow);
         this.container.appendChild(uiPanel);
 
         // --- NEW: RIGHT TRANSFORM PANEL ---
@@ -1147,11 +1214,12 @@ class MocapSurgeonViewport {
             // Utility to extract Side Color based on the SWAPPED Upper / SWAPPED Lower mapping
             const getSideColor = (idx) => {
                 const i = parseInt(idx);
-                // Visual Left of Screen (Red): 12(RightArm), 14, 16, and Swapped 24(RightLeg), 26, 28
-                if ([12, 14, 16, 24, 26, 28].includes(i)) return 0xff4444; // Red
-                // Visual Right of Screen (Blue): 11(LeftArm), 13, 15, and Swapped 23(LeftLeg), 25, 27
-                if ([11, 13, 15, 23, 25, 27].includes(i)) return 0x4444ff; // Blue
-                return 0x44ff44; // Center Spine (Green)
+                // Visual Left of Screen (Muted Gray-Red)
+                if ([12, 14, 16, 24, 26, 28].includes(i)) return 0x886666; 
+                // Visual Right of Screen (Muted Gray-Blue)
+                if ([11, 13, 15, 23, 25, 27].includes(i)) return 0x666688; 
+                // Center Spine (Muted Gray-Green)
+                return 0x668866; 
             };
 
             // Define Global-Space Geometry for Raycasting Joints (Independent of Bone Scale)
@@ -1266,6 +1334,7 @@ class MocapSurgeonViewport {
             });
 
             this.scene.add(this.rig);
+            this.rig.add(this.onionGroup); // Fix: Onion skin now perfectly aligns with the rig!
             
             // Critical Pre-measurement: Find true Rest-Pose shoulder distance and midpoint before the raycaster rips the hierarchy
             this.rig.updateMatrixWorld(true);
@@ -1352,7 +1421,9 @@ class MocapSurgeonViewport {
     updateTimelineTicks() {
         if (!this.ticksContainer || !this.videoEl || isNaN(this.videoEl.duration) || this.videoEl.duration === 0) return;
 
-        this.ticksContainer.innerHTML = ""; // Clear existing ticks
+        // SAFE CLEAR: Only delete the orange ticks, do not destroy the Blue Range Box!
+        const existingTicks = this.ticksContainer.querySelectorAll('.mocap-tick');
+        existingTicks.forEach(t => t.remove());
 
         const totalFrames = Math.round(this.videoEl.duration * 30);
         if (totalFrames <= 0) return;
@@ -1363,13 +1434,14 @@ class MocapSurgeonViewport {
                 const percent = (fIdx / totalFrames) * 100;
 
                 const tick = document.createElement("div");
+                tick.className = "mocap-tick"; // TAG IT SO IT CAN BE SAFELY REMOVED LATER
                 Object.assign(tick.style, {
                     position: "absolute",
                     left: `${percent}%`,
-                    top: "14px", // Sit exactly under the slider track
+                    top: "14px", 
                     width: "2px",
                     height: "6px",
-                    backgroundColor: "#ffa500", // Matches the orange EDITED tag
+                    backgroundColor: "#ffa500", 
                     transform: "translateX(-50%)",
                     borderRadius: "1px"
                 });
@@ -1377,7 +1449,130 @@ class MocapSurgeonViewport {
             }
         }
     }
-   
+
+    // --- NEW: TIME-TRAVEL ONION SKIN ENGINE (OPTIMIZED + RED/GREEN) ---
+    drawOnionSkin() {
+        if (!this.onionGroup) return;
+        
+        // 1. PERFORMANCE LOCK: Instant exit if disabled or playing
+        if (!this.showOnionSkin || this.currentFrameIndex === null || (this.videoEl && !this.videoEl.paused)) {
+            if (this.onionGroup.children.length > 0) this.onionGroup.clear(); // Safe native clear
+            this.wasShowingOnion = false;
+            return;
+        }
+
+        // Force refresh if the UI toggle was just turned on
+        if (!this.wasShowingOnion) {
+            this.lastOnionFrame = -1;
+            this.wasShowingOnion = true;
+        }
+
+        // 2. PERFORMANCE LOCK: Only recalculate if we changed frames or are actively dragging a joint!
+        const isDragging = this.transformControls && this.transformControls.dragging;
+        if (this.currentFrameIndex === this.lastOnionFrame && !isDragging) {
+            return; // Skip heavy math, keep displaying cached onion layers!
+        }
+        this.lastOnionFrame = this.currentFrameIndex;
+
+        // Ensure it's safely in the global scene for accurate World Space coordinates
+        if (this.onionGroup.parent !== this.scene) this.scene.add(this.onionGroup);
+        this.onionGroup.clear();
+
+        // 1. SAVE CURRENT RIG STATE
+        const backupState = {};
+        for (const [mpIdx, bone] of Object.entries(this.mocapBones)) {
+            backupState[mpIdx] = {
+                pos: bone.position.clone(),
+                quat: bone.quaternion.clone()
+            };
+        }
+
+        const dotGeo = new this.THREE.SphereGeometry(0.015, 6, 6);
+
+        const drawSkeleton = (fIdx, colorHex, opacity) => {
+            const frameData = this.motionData[fIdx];
+            if (!frameData || !frameData.bones) return;
+
+            // 2. TIME TRAVEL: INSTANTLY APPLY PAST FRAME TO RIG
+            for (const [mpIdx, dat] of Object.entries(frameData.bones)) {
+                const bone = this.mocapBones[mpIdx];
+                if (!bone || !dat) continue;
+
+                if (parseInt(mpIdx) >= 300 && parseInt(mpIdx) <= 369) { 
+                    if (dat.posX !== undefined) bone.position.set(dat.posX, dat.posY, dat.posZ);
+                } else { 
+                    if (dat.x !== undefined) bone.quaternion.set(dat.x, dat.y, dat.z, dat.w);
+                }
+            }
+            if (frameData.hipsPos && this.mocapBones[99]) {
+                this.mocapBones[99].position.set(frameData.hipsPos.x, frameData.hipsPos.y, frameData.hipsPos.z);
+            }
+            
+            this.rig.updateMatrixWorld(true);
+
+            // 3. READ TRUE 3D WORLD POSITIONS
+            const worldPositions = {};
+            [99, 901, 902, 903, 0, 11, 13, 15, 12, 14, 16, 23, 25, 27, 24, 26, 28].forEach(idx => {
+                if (this.mocapBones[idx]) {
+                    worldPositions[idx] = this.mocapBones[idx].getWorldPosition(new this.THREE.Vector3());
+                }
+            });
+
+            // 4. DRAW GLOWING DOTS AND LINES IN WORLD SPACE
+            const material = new this.THREE.MeshBasicMaterial({ color: colorHex, transparent: true, opacity: opacity, depthTest: false, depthWrite: false });
+            
+            for (let i in worldPositions) {
+                let dot = new this.THREE.Mesh(dotGeo, material);
+                dot.position.copy(worldPositions[i]);
+                this.onionGroup.add(dot);
+            }
+
+            const linePoints = [];
+            this.BONE_CONNECTIONS.forEach(([i, j]) => {
+                if (worldPositions[i] && worldPositions[j]) {
+                    linePoints.push(worldPositions[i], worldPositions[j]);
+                }
+            });
+            if (linePoints.length > 0) {
+                const lineGeo = new this.THREE.BufferGeometry().setFromPoints(linePoints);
+                const lineMat = new this.THREE.LineBasicMaterial({ color: colorHex, transparent: true, opacity: opacity * 0.5, depthTest: false });
+                this.onionGroup.add(new this.THREE.LineSegments(lineGeo, lineMat));
+            }
+        };
+
+        const getNearestFrame = (targetF) => {
+            if (this.motionData[targetF] && this.motionData[targetF].bones) return targetF;
+            for (let offset = 1; offset <= 6; offset++) {
+                if (this.motionData[targetF - offset] && this.motionData[targetF - offset].bones) return targetF - offset;
+                if (this.motionData[targetF + offset] && this.motionData[targetF + offset].bones) return targetF + offset;
+            }
+            return null;
+        };
+
+        // Draw Past (Bright Red)
+        for (let i = 1; i <= this.onionSkinLayers; i++) {
+            let actualF = getNearestFrame(this.currentFrameIndex - (i * this.onionSkinStep));
+            // Drops opacity by 35% per step, flooring at 15% visibility
+            if (actualF !== null) drawSkeleton(actualF, 0xff0000, Math.max(0.15, 1.0 - (i * 0.35))); 
+        }
+
+        // Draw Future (Bright Green)
+        for (let i = 1; i <= this.onionSkinLayers; i++) {
+            let actualF = getNearestFrame(this.currentFrameIndex + (i * this.onionSkinStep));
+            if (actualF !== null) drawSkeleton(actualF, 0x00ff00, Math.max(0.15, 1.0 - (i * 0.35))); 
+        }
+
+        // 5. BACK TO THE PRESENT: RESTORE CURRENT RIG STATE
+        for (const [mpIdx, state] of Object.entries(backupState)) {
+            const bone = this.mocapBones[mpIdx];
+            if (bone) {
+                bone.position.copy(state.pos);
+                bone.quaternion.copy(state.quat);
+            }
+        }
+        this.rig.updateMatrixWorld(true);
+    }
+             
 
     // --- MANUAL EDIT BLENDER ALGORITHM ---
     saveManualEdit() {
@@ -1386,7 +1581,6 @@ class MocapSurgeonViewport {
         let mpIdx = this.selectedMpIdx;
         let frameIdx = this.currentFrameIndex;
         
-        // Ensure frame memory exists safely
         if (!this.motionData[frameIdx]) this.motionData[frameIdx] = { bones: {} };
         if (!this.motionData[frameIdx].bones[mpIdx]) this.motionData[frameIdx].bones[mpIdx] = {};
 
@@ -1396,71 +1590,225 @@ class MocapSurgeonViewport {
         this.motionData[frameIdx].hasManualEdits = true; 
         this.motionData[frameIdx].bones[mpIdx].isManual = true; 
         
+        // --- NEW: BACKUP PRISTINE AI DATA BEFORE OVERWRITING ---
+        let bDat = this.motionData[frameIdx].bones[mpIdx];
+        if (bDat.baseX === undefined && bDat.x !== undefined) {
+            bDat.baseX = bDat.x; bDat.baseY = bDat.y; bDat.baseZ = bDat.z; 
+            if (bDat.w !== undefined) bDat.baseW = bDat.w;
+        }
+
         // Save explicit overwrite values
-        this.motionData[frameIdx].bones[mpIdx].x = quat.x;
-        this.motionData[frameIdx].bones[mpIdx].y = quat.y;
-        this.motionData[frameIdx].bones[mpIdx].z = quat.z;
-        this.motionData[frameIdx].bones[mpIdx].w = quat.w;
+        bDat.x = quat.x; bDat.y = quat.y; bDat.z = quat.z; bDat.w = quat.w;
         
         // If Hips, also explicitly save position
         if (mpIdx == 99) {
             if(!this.motionData[frameIdx].hipsPos) this.motionData[frameIdx].hipsPos = {};
-            this.motionData[frameIdx].hipsPos.x = bone.position.x;
-            this.motionData[frameIdx].hipsPos.y = bone.position.y;
-            this.motionData[frameIdx].hipsPos.z = bone.position.z;
-            this.motionData[frameIdx].hipsPos.isManual = true;
+            let hDat = this.motionData[frameIdx].hipsPos;
+            
+            if (hDat.baseX === undefined && hDat.x !== undefined) {
+                hDat.baseX = hDat.x; hDat.baseY = hDat.y; hDat.baseZ = hDat.z;
+            }
+            hDat.x = bone.position.x; hDat.y = bone.position.y; hDat.z = bone.position.z;
+            hDat.isManual = true;
         }
 
-        // --- LINEAR INTERPOLATION (SLERP BLENDING) ---
-        // Dynamically smoothes the manual fix back into the raw tracking data over a 10 frame window to prevent visual popping.
-        const BLEND_FRAMES = 10;
-        const manQuat = new this.THREE.Quaternion(quat.x, quat.y, quat.z, quat.w);
-        const manPos = mpIdx == 99 ? new this.THREE.Vector3(bone.position.x, bone.position.y, bone.position.z) : null;
+        // Trigger the Slerp!
+        this.performBlendAt(frameIdx, mpIdx);
 
-        const performBlend = (directionMultiplier) => {
+        this.updateTimelineTicks(); 
+        this.lastOnionFrame = -1; // Force Onion Skin redraw
+    }
+
+    // --- NEW: MODULAR BLEND ENGINE ---
+    performBlendAt(frameIdx, mpIdx) {
+        const BLEND_FRAMES = 10;
+        const sourceFrame = this.motionData[frameIdx];
+        if (!sourceFrame || !sourceFrame.bones[mpIdx] || !sourceFrame.bones[mpIdx].isManual) return;
+
+        const manData = sourceFrame.bones[mpIdx];
+        const manQuat = new this.THREE.Quaternion(manData.x, manData.y, manData.z, manData.w);
+        
+        let manPos = null;
+        if (mpIdx == 99 && sourceFrame.hipsPos && sourceFrame.hipsPos.isManual) {
+            manPos = new this.THREE.Vector3(sourceFrame.hipsPos.x, sourceFrame.hipsPos.y, sourceFrame.hipsPos.z);
+        }
+
+        const sweep = (directionMultiplier) => {
             for (let i = 1; i <= BLEND_FRAMES; i++) {
                 let f = frameIdx + (i * directionMultiplier);
                 
                 // Break if we hit empty data space or another manual keyframe boundary
-                if (!this.motionData[f] || (this.motionData[f].bones[mpIdx] && this.motionData[f].bones[mpIdx].isManual)) break; 
+                if (!this.motionData[f] || !this.motionData[f].bones[mpIdx]) break; 
+                if (this.motionData[f].bones[mpIdx].isManual) break; 
+                
+                let targetRaw = this.motionData[f].bones[mpIdx];
+                
+                // Backup pristine AI data before modifying
+                if (targetRaw.baseX === undefined && targetRaw.x !== undefined) {
+                    targetRaw.baseX = targetRaw.x; targetRaw.baseY = targetRaw.y; targetRaw.baseZ = targetRaw.z; 
+                    if (targetRaw.w !== undefined) targetRaw.baseW = targetRaw.w;
+                }
                 
                 // Blend Quaternions
-                if (this.motionData[f].bones[mpIdx] && this.motionData[f].bones[mpIdx].rawW !== undefined) {
-                    let targetRaw = this.motionData[f].bones[mpIdx];
-                    
-                    // SLERP POPPING FIX: Blend to the FILTERED track data (x,y,z,w), NOT the jittery RAW data (rawX,rawY,rawZ,rawW)
-                    let targetQ = new this.THREE.Quaternion(targetRaw.x, targetRaw.y, targetRaw.z, targetRaw.w);
+                if (targetRaw.baseW !== undefined && manQuat.x !== undefined) {
+                    let targetQ = new this.THREE.Quaternion(targetRaw.baseX, targetRaw.baseY, targetRaw.baseZ, targetRaw.baseW);
                     let t = i / (BLEND_FRAMES + 1);
-                    let blended = new this.THREE.Quaternion().copy(manQuat).slerp(targetQ, t); // Spherical blend
+                    let blended = new this.THREE.Quaternion().copy(manQuat).slerp(targetQ, t); 
                     
-                    targetRaw.x = blended.x;
-                    targetRaw.y = blended.y;
-                    targetRaw.z = blended.z;
-                    targetRaw.w = blended.w;
-                    targetRaw.isBlended = true; // MEMORY CORRUPTION FIX: Protect this blended edit from being overwritten by tracking
-                    this.motionData[f].hasManualEdits = true; // Flag for UI Indicator
+                    targetRaw.x = blended.x; targetRaw.y = blended.y; targetRaw.z = blended.z; targetRaw.w = blended.w;
+                    targetRaw.isBlended = true;
+                    this.motionData[f].hasManualEdits = true; 
                 }
                 
                 // Blend Position (Hips Only)
-                if (mpIdx == 99 && manPos && this.motionData[f].hipsPos && this.motionData[f].hipsPos.rawX !== undefined) {
-                    let targetPos = this.motionData[f].hipsPos;
-                    // Blend to the FILTERED position
-                    let targetP = new this.THREE.Vector3(targetPos.x, targetPos.y, targetPos.z);
-                    let t = i / (BLEND_FRAMES + 1);
-                    let blendedP = new this.THREE.Vector3().copy(manPos).lerp(targetP, t); // Linear blend
-                    
-                    targetPos.x = blendedP.x;
-                    targetPos.y = blendedP.y;
-                    targetPos.z = blendedP.z;
-                    targetPos.isBlended = true; // MEMORY CORRUPTION FIX
+                if (mpIdx == 99 && manPos && this.motionData[f].hipsPos) {
+                    let targetPDat = this.motionData[f].hipsPos;
+                    if (targetPDat.baseX === undefined && targetPDat.x !== undefined) {
+                        targetPDat.baseX = targetPDat.x; targetPDat.baseY = targetPDat.y; targetPDat.baseZ = targetPDat.z;
+                    }
+                    if (targetPDat.baseX !== undefined) {
+                        let targetP = new this.THREE.Vector3(targetPDat.baseX, targetPDat.baseY, targetPDat.baseZ);
+                        let t = i / (BLEND_FRAMES + 1);
+                        let blendedP = new this.THREE.Vector3().copy(manPos).lerp(targetP, t); 
+                        
+                        targetPDat.x = blendedP.x; targetPDat.y = blendedP.y; targetPDat.z = blendedP.z;
+                        targetPDat.isBlended = true;
+                    }
                 }
             }
         };
 
-        performBlend(1);  // Forward Slerp
-        performBlend(-1); // Backward Slerp
+        sweep(1);  // Forward
+        sweep(-1); // Backward
+    }
 
-        this.updateTimelineTicks(); // NEW: Draw the tick mark
+
+        // --- UNIFIED RANGE & DELETION LOGIC ---
+    updateRangeHighlight() {
+        if (!this.rangeHighlight || !this.videoEl || isNaN(this.videoEl.duration) || this.videoEl.duration === 0) return;
+        const totalFrames = Math.round(this.videoEl.duration * 30);
+        
+        // Create Visual Brackets if they don't exist
+        if (!this.inMarker) {
+            this.inMarker = document.createElement("div");
+            Object.assign(this.inMarker.style, { 
+                position: "absolute", top: "-4px", color: "#00ff00", fontWeight: "900", 
+                fontSize: "24px", pointerEvents: "none", zIndex: "3", display: "none", transform: "translateX(-50%)" 
+            });
+            this.inMarker.innerText = "❲";
+            this.ticksContainer.appendChild(this.inMarker);
+            
+            this.outMarker = document.createElement("div");
+            Object.assign(this.outMarker.style, { 
+                position: "absolute", top: "-4px", color: "#ff0000", fontWeight: "900", 
+                fontSize: "24px", pointerEvents: "none", zIndex: "3", display: "none", transform: "translateX(-50%)" 
+            });
+            this.outMarker.innerText = "❳";
+            this.ticksContainer.appendChild(this.outMarker);
+        }
+
+        if (this.markInFrame != null || this.markOutFrame != null) {
+            this.rangeHighlight.style.display = "block";
+            let start = this.markInFrame != null ? this.markInFrame : 0;
+            let end = this.markOutFrame != null ? this.markOutFrame : totalFrames;
+            
+            if (start > end) { let temp = start; start = end; end = temp; }
+            
+            let startPct = (start / totalFrames) * 100;
+            let endPct = (end / totalFrames) * 100;
+            
+            this.rangeHighlight.style.left = `${startPct}%`;
+            this.rangeHighlight.style.width = `${Math.max(0.5, endPct - startPct)}%`;
+            // UX FIX: Force the box to overlay the slider with thick neon borders
+            this.rangeHighlight.style.zIndex = "5"; 
+            this.rangeHighlight.style.borderLeft = this.markInFrame != null ? "4px solid #00ff00" : "none";
+            this.rangeHighlight.style.borderRight = this.markOutFrame != null ? "4px solid #ff0000" : "none";
+            this.rangeHighlight.style.height = "16px";
+            this.rangeHighlight.style.top = "2px";
+            
+            if (this.markInFrame != null) {
+                this.inMarker.style.display = "block";
+                this.inMarker.style.left = `${(this.markInFrame / totalFrames) * 100}%`;
+            } else this.inMarker.style.display = "none";
+            
+            if (this.markOutFrame != null) {
+                this.outMarker.style.display = "block";
+                this.outMarker.style.left = `${(this.markOutFrame / totalFrames) * 100}%`;
+            } else this.outMarker.style.display = "none";
+        } else {
+            this.rangeHighlight.style.display = "none";
+            this.inMarker.style.display = "none";
+            this.outMarker.style.display = "none";
+        }
+    }
+
+    deleteData() {
+        if (!this.videoEl || this.currentFrameIndex === null) return;
+        const totalFrames = Math.round(this.videoEl.duration * 30);
+        
+        let start = this.markInFrame != null ? this.markInFrame : this.currentFrameIndex;
+        let end = this.markOutFrame != null ? this.markOutFrame : this.currentFrameIndex;
+        if (start > end) { let temp = start; start = end; end = temp; }
+        
+        let paddedStart = Math.max(0, start - 10);
+        let paddedEnd = Math.min(totalFrames, end + 10);
+        
+        // 1. Wipe everything in the padded range back to pristine AI data
+        for (let f = paddedStart; f <= paddedEnd; f++) {
+            if (this.motionData[f] && this.motionData[f].bones) {
+                let targetBones = Object.keys(this.motionData[f].bones);
+                if (this.selectedMpIdx && this.markInFrame == null && this.markOutFrame == null) {
+                    targetBones = [this.selectedMpIdx];
+                }
+                
+                targetBones.forEach(mpIdx => {
+                    let bDat = this.motionData[f].bones[mpIdx];
+                    if (bDat) {
+                        // Only delete the manual anchor if it's strictly inside the selected range
+                        if (f >= start && f <= end) bDat.isManual = false;
+                        
+                        bDat.isBlended = false; 
+                        // RESTORE BASE AI TRACKING
+                        if (bDat.baseX !== undefined) {
+                            bDat.x = bDat.baseX; bDat.y = bDat.baseY; bDat.z = bDat.baseZ; 
+                            if (bDat.baseW !== undefined) bDat.w = bDat.baseW;
+                        }
+                    }
+                    if (mpIdx == 99 && this.motionData[f].hipsPos) {
+                        let hDat = this.motionData[f].hipsPos;
+                        if (f >= start && f <= end) hDat.isManual = false;
+                        hDat.isBlended = false;
+                        if (hDat.baseX !== undefined) {
+                            hDat.x = hDat.baseX; hDat.y = hDat.baseY; hDat.z = hDat.baseZ;
+                        }
+                    }
+                });
+                
+                let anyManual = false;
+                for (let key in this.motionData[f].bones) {
+                    if (this.motionData[f].bones[key].isManual) anyManual = true;
+                }
+                this.motionData[f].hasManualEdits = anyManual;
+            }
+        }
+        
+        // 2. NEW: Re-trigger Slerp for any SURVIVING manual keyframes nearby to heal the gap!
+        for (let f = paddedStart - 10; f <= paddedEnd + 10; f++) {
+            if (this.motionData[f] && this.motionData[f].bones) {
+                let targetBones = this.selectedMpIdx && this.markInFrame == null && this.markOutFrame == null ? [this.selectedMpIdx] : Object.keys(this.motionData[f].bones);
+                targetBones.forEach(mpIdx => {
+                    if (this.motionData[f].bones[mpIdx]?.isManual) {
+                        this.performBlendAt(f, mpIdx);
+                    }
+                });
+            }
+        }
+        
+        this.markInFrame = null;
+        this.markOutFrame = null;
+        this.updateRangeHighlight();
+        this.updateTimelineTicks();
+        this.lastOnionFrame = -1; // Force Onion Skin redraw
     }
 
     syncCamera() {
@@ -1908,10 +2256,16 @@ class MocapSurgeonViewport {
             this.timelineSlider.value = currentTimeSec;
         }
         
-        // --- NEW FRAMES UI DISPLAY ---
+        // --- NEW FRAMES UI DISPLAY (WITH RANGE TEXT) ---
         if (this.timeLabel) {
             const totalFrames = (this.videoEl && !isNaN(this.videoEl.duration)) ? Math.round(this.videoEl.duration * 30) : 0;
-            this.timeLabel.innerText = `${this.currentFrameIndex} / ${totalFrames} f`;
+            let rangeText = "";
+            if (this.markInFrame != null || this.markOutFrame != null) {
+                let inF = this.markInFrame != null ? this.markInFrame : 0;
+                let outF = this.markOutFrame != null ? this.markOutFrame : totalFrames;
+                rangeText = `<span style="color:#00d2ff; font-weight:bold; margin-right:8px;">[ ${inF} ➔ ${outF} ]</span>`;
+            }
+            this.timeLabel.innerHTML = `${rangeText}${this.currentFrameIndex} / ${totalFrames} f`;
         }
         
         if (this.recordingIndicator) {
@@ -2258,7 +2612,7 @@ class MocapSurgeonViewport {
                             if (dict && handWorldPose) {
                                 for(let finger of dict) {
                                     const dir = this.getDirectionVector(handWorldPose[finger.p1], handWorldPose[finger.p2]);
-                                    this.boneSwingAtDir(finger.id, this.mocapBones[finger.id], dir, currentTimeSec);this.boneSwingAtDir(finger.id, this.mocapBones[finger.id], dir, currentTimeSec, 3.0, 0.0);
+                                    this.boneSwingAtDir(finger.id, this.mocapBones[finger.id], dir, currentTimeSec, 3.0, 0.0);
                                 }
                             }
                         }
@@ -2449,6 +2803,9 @@ class MocapSurgeonViewport {
                 }
             });
         }
+
+        // --- DRAW ONION SKIN OVERLAYS ---
+        this.drawOnionSkin();
         
         this.renderer.render(this.scene, this.camera);
     }
