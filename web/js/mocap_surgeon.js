@@ -795,70 +795,88 @@ class MocapSurgeonViewport {
         });
         this.container.appendChild(this.recordingIndicator);
 
-        // Orange Edited Tag overlay
+        // Orange Edited Tag overlay (Shifted left to make room for Help button)
         this.editedIndicator = document.createElement("div");
         this.editedIndicator.innerHTML = "📝 EDITED";
         Object.assign(this.editedIndicator.style, {
-            position: "absolute", top: "16px", right: "16px", color: "#ffa500",
+            position: "absolute", top: "16px", right: "64px", color: "#ffa500",
             fontWeight: "bold", fontSize: "14px", display: "none", zIndex: "10",
             background: "rgba(20, 20, 20, 0.8)", padding: "6px 12px", borderRadius: "4px",
             border: "1px solid #ffa500", letterSpacing: "1px", boxShadow: "0 0 8px rgba(255, 165, 0, 0.3)"
         });
         this.container.appendChild(this.editedIndicator);
 
-        // --- NEW: TOP PANEL (Visual Toggles) ---
-        const topPanel = document.createElement("div");
-        Object.assign(topPanel.style, {
-            position: "absolute",
-            top: "16px",
-            left: "50%",
-            transform: "translateX(-50%)",
-            display: "flex",
-            gap: "16px",
-            background: "rgba(20, 20, 20, 0.85)",
-            padding: "8px 16px",
-            borderRadius: "8px",
-            border: "1px solid #444",
-            zIndex: "10",
-            backdropFilter: "blur(4px)",
-            alignItems: "center",
-            flexWrap: "wrap",
-            justifyContent: "center"
+        // --- NEW: FLOATING HELP BUTTON ---
+        const btnHelp = document.createElement("button");
+        btnHelp.innerHTML = "?";
+        Object.assign(btnHelp.style, {
+            position: "absolute", top: "16px", right: "16px",
+            width: "36px", height: "36px", borderRadius: "50%",
+            background: "rgba(0, 210, 255, 0.1)", border: "2px solid #00d2ff",
+            color: "#00d2ff", fontSize: "20px", fontWeight: "bold", transition: "all 0.2s",
+            cursor: "pointer", zIndex: "100", display: "flex",
+            justifyContent: "center", alignItems: "center",
+            boxShadow: "0 0 10px rgba(0, 210, 255, 0.3)", backdropFilter: "blur(4px)"
         });
+        btnHelp.onmouseover = () => { btnHelp.style.background = "rgba(0, 210, 255, 0.3)"; btnHelp.style.transform = "scale(1.05)"; };
+        btnHelp.onmouseout = () => { btnHelp.style.background = "rgba(0, 210, 255, 0.1)"; btnHelp.style.transform = "scale(1)"; };
+        btnHelp.onclick = () => this.helpModal.style.display = this.helpModal.style.display === "none" ? "flex" : "none";
+        this.container.appendChild(btnHelp);
 
-        // --- BOTTOM PANEL ---
-        const uiPanel = document.createElement("div");
-        Object.assign(uiPanel.style, {
-            position: "absolute",
-            bottom: "16px",
-            left: "50%",
-            transform: "translateX(-50%)",
-            display: "flex",
-            flexDirection: "column",
-            gap: "8px",
-            background: "rgba(20, 20, 20, 0.85)",
-            padding: "12px 16px",
-            borderRadius: "8px",
-            border: "1px solid #444",
-            zIndex: "10",
-            backdropFilter: "blur(4px)",
-            alignItems: "stretch",
-            minWidth: "80%"
+        // --- NEW: HELP OVERLAY MODAL ---
+        this.helpModal = document.createElement("div");
+        Object.assign(this.helpModal.style, {
+            position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
+            width: "80%", maxWidth: "600px", background: "rgba(15, 15, 20, 0.95)",
+            border: "1px solid #00d2ff", borderRadius: "8px", padding: "24px",
+            color: "#ccc", fontSize: "13px", lineHeight: "1.6", zIndex: "101",
+            display: "none", flexDirection: "column", gap: "12px",
+            boxShadow: "0 0 30px rgba(0, 210, 255, 0.4)", backdropFilter: "blur(8px)"
         });
+        
+        this.helpModal.innerHTML = `
+            <h2 style="color: #00d2ff; margin: 0 0 8px 0; border-bottom: 1px solid #333; padding-bottom: 8px;">Mocap Surgeon - Workflow Guide</h2>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                <div>
+                    <h4 style="color: #4ade80; margin: 0 0 4px 0;">🎥 STEP 1: LOAD VIDEO</h4>
+                    <ul style="margin: 0; padding-left: 16px;">
+                        <li>Load a video and press <b>Sync Camera</b> to lock the 3D space.</li>
+                        <li>Toggle Face/Hands tracking if needed (requires more processing).</li>
+                    </ul>
+                    <h4 style="color: #ffb020; margin: 12px 0 4px 0;">⚙️ STEP 2: PLAY & FILTER</h4>
+                    <ul style="margin: 0; padding-left: 16px;">
+                        <li>Press <b>Play</b> to let the AI process and record the motion.</li>
+                        <li>Adjust <b>Base Smoothing</b> to remove shaking (lower values = heavier smoothing).</li>
+                        <li>Adjust <b>Action Speed</b> to help the rig catch up to fast punches without lagging.</li>
+                    </ul>
+                </div>
+                <div>
+                    <h4 style="color: #ff4444; margin: 0 0 4px 0;">✂️ STEP 3: SURGERY</h4>
+                    <ul style="margin: 0; padding-left: 16px;">
+                        <li>Enable <b>Edit Mode</b> and click any joint to select it.</li>
+                        <li>Press <b>R</b> to Rotate, <b>G</b> to Translate (Hips only).</li>
+                        <li>Use <b>I</b> and <b>O</b> to set an editing range.</li>
+                        <li>Press <b>D</b> to Delete bad tracking or manual edits.</li>
+                        <li>Use <b>Left Arrow or ,</b> and <b>Right Arrow or .</b> to step frame-by-frame.</li>
+                    </ul>
+                    <h4 style="color: #b055ff; margin: 12px 0 4px 0;">💾 STEP 4: BAKE</h4>
+                    <ul style="margin: 0; padding-left: 16px;">
+                        <li>Type a name and press Save to bake to the Action Director.</li>
+                    </ul>
+                </div>
+            </div>
+            <button id="closeHelpBtn" style="margin-top: 12px; align-self: center; background: #333; color: white; border: 1px solid #555; padding: 6px 24px; border-radius: 4px; cursor: pointer; font-weight: bold;">Got it!</button>
+        `;
+        this.container.appendChild(this.helpModal);
+        this.helpModal.querySelector("#closeHelpBtn").onclick = () => this.helpModal.style.display = "none";
 
+        // UI Builder Helpers
         const createBtn = (text, color) => {
             const btn = document.createElement("button");
             btn.innerText = text;
             Object.assign(btn.style, {
-                background: color,
-                color: "#fff",
-                border: "1px solid #555",
-                borderRadius: "4px",
-                padding: "6px 12px",
-                cursor: "pointer",
-                fontSize: "12px",
-                fontWeight: "bold",
-                transition: "all 0.2s"
+                background: color, color: "#fff", border: "1px solid #555", borderRadius: "4px",
+                padding: "6px 12px", cursor: "pointer", fontSize: "12px", fontWeight: "bold", transition: "all 0.2s"
             });
             btn.onmouseover = () => btn.style.filter = "brightness(1.2)";
             btn.onmouseout = () => btn.style.filter = "brightness(1.0)";
@@ -871,214 +889,186 @@ class MocapSurgeonViewport {
             const lbl = document.createElement("span"); lbl.innerText = labelStr;
             const sld = document.createElement("input");
             sld.type = "range"; sld.min = min; sld.max = max; sld.step = step; sld.value = def;
-            sld.className = "mocap-theme-slider"; // Themed slider
+            sld.className = "mocap-theme-slider"; 
             Object.assign(sld.style, { width: "60px" });
             const val = document.createElement("span"); val.innerText = def;
-            sld.oninput = (e) => {
-                val.innerText = e.target.value;
-                onChange(parseFloat(e.target.value));
-            };
+            sld.oninput = (e) => { val.innerText = e.target.value; onChange(parseFloat(e.target.value)); };
             wrap.append(lbl, sld, val);
             return wrap;
         };
 
         const buildToggle = (labelText, defaultState, callback) => {
             const lbl = document.createElement("label");
-            Object.assign(lbl.style, {
-                display: "flex", gap: "6px", color: "#ccc", fontSize: "12px", alignItems: "center", cursor: "pointer", marginLeft: "8px", fontWeight: "bold"
-            });
+            Object.assign(lbl.style, { display: "flex", gap: "6px", color: "#ccc", fontSize: "12px", alignItems: "center", cursor: "pointer", marginLeft: "8px", fontWeight: "bold" });
             const chk = document.createElement("input");
-            chk.type = "checkbox";
-            chk.checked = defaultState;
+            chk.type = "checkbox"; chk.checked = defaultState;
             chk.onchange = (e) => callback(e.target.checked);
             lbl.append(chk, " " + labelText);
             return lbl;
         };
 
-        const fileInput = document.createElement("input");
-        fileInput.type = "file";
-        fileInput.accept = "video/*";
-        fileInput.style.display = "none";
+        // --- NEW: VISUAL UI GROUPING FACTORY ---
+        const buildStepBox = (titleText, color) => {
+            const box = document.createElement("div");
+            Object.assign(box.style, {
+                border: `1px solid ${color}`, borderRadius: "6px", padding: "14px 8px 8px 8px",
+                display: "flex", flexWrap: "wrap", gap: "8px", position: "relative",
+                background: "rgba(0, 0, 0, 0.4)", alignItems: "center", justifyContent: "center", flexGrow: "1"
+            });
+            const title = document.createElement("div");
+            title.innerText = titleText;
+            Object.assign(title.style, {
+                position: "absolute", top: "-8px", left: "12px", background: "#1a1a1a",
+                padding: "0 6px", color: color, fontSize: "10px", fontWeight: "bold", letterSpacing: "1px"
+            });
+            box.appendChild(title);
+            return box;
+        };
 
-        const btnLoad = createBtn("📂 Load Video", "#2a2a2a");
-        const btnSync = createBtn("🎥 Sync Camera", "#006699");
+        // --- TOP PANEL (Cleaned up Visual Toggles) ---
+        const topPanel = document.createElement("div");
+        Object.assign(topPanel.style, {
+            position: "absolute", top: "16px", left: "50%", transform: "translateX(-50%)",
+            display: "flex", gap: "16px", background: "rgba(20, 20, 20, 0.85)", padding: "8px 16px",
+            borderRadius: "8px", border: "1px solid #444", zIndex: "10", backdropFilter: "blur(4px)",
+            alignItems: "center", flexWrap: "wrap", justifyContent: "center"
+        });
+
+        const tglOpenPose = buildToggle("OpenPose Proxy", this.showOpenPose, (v) => { this.showOpenPose = v; this.updateMeshVisibility(); });
+        const tglGeoDepth = buildToggle("Character Mesh", this.showGeoDepth, (v) => { this.showGeoDepth = v; this.updateMeshVisibility(); });
+        const tglMP = buildToggle("MP Points", this.showMPPoints, (v) => this.showMPPoints = v);
+        
+        topPanel.append(tglGeoDepth, tglOpenPose, tglMP);
+        this.container.appendChild(topPanel);
+
+        // --- BOTTOM PANEL ASSEMBLY ---
+        const uiPanel = document.createElement("div");
+        Object.assign(uiPanel.style, {
+            position: "absolute", bottom: "16px", left: "50%", transform: "translateX(-50%)",
+            display: "flex", flexDirection: "column", gap: "8px", background: "rgba(20, 20, 20, 0.85)",
+            padding: "12px 16px", borderRadius: "8px", border: "1px solid #444", zIndex: "10",
+            backdropFilter: "blur(4px)", alignItems: "stretch", minWidth: "80%"
+        });
+
+        const fileInput = document.createElement("input"); fileInput.type = "file"; fileInput.accept = "video/*"; fileInput.style.display = "none";
+        const btnLoad = createBtn("📂 Load", "#2a2a2a");
+        const btnSync = createBtn("🎥 Sync", "#006699");
         this.btnPlay = createBtn("▶ Play", "#2d5a27");
+        const sldCutoff = buildSlider("Base Smoothing (Lower=Stronger):", 0.001, 5.0, 0.01, 0.01, v => this.filterMinCutoff = v);
+        const sldBeta = buildSlider("Action Speed (Higher=Snappier):", 0.0, 50.0, 0.1, 20.0, v => this.filterBeta = v);
 
-        // UI FIX: Descriptive names for 1Euro Filter parameters
-        const sldCutoff = buildSlider("Jitter Reduction:", 0.001, 5.0, 0.01, 0.01, v => this.filterMinCutoff = v);
-        const sldBeta = buildSlider("Speed Responsiveness:", 0.0, 50.0, 0.1, 20.0, v => this.filterBeta = v);
+        // --- STEP 1: LOAD VIDEO ---
+        const step1Box = buildStepBox("STEP 1: LOAD VIDEO", "#4ade80");
+        const tglUpper = buildToggle("Upper Body", this.upperBodyOnly, (v) => this.upperBodyOnly = v);
+        const tglHands = buildToggle("Hands", this.trackHands, (v) => this.trackHands = v);
+        const tglFace = buildToggle("Face", this.trackFace, (v) => this.trackFace = v);
+        step1Box.append(fileInput, btnLoad, btnSync, tglUpper, tglHands, tglFace);
 
-        // --- Visual Toggles (Moved to Top Panel) ---
-        const tglOpenPose = buildToggle("OpenPose Proxy", this.showOpenPose, (v) => {
-            this.showOpenPose = v;
-            this.updateMeshVisibility();
-        });
+        // --- STEP 2: PLAYBACK & FILTERING ---
+        const step2Box = buildStepBox("STEP 2: PLAY & FILTER", "#ffb020");
+        step2Box.append(this.btnPlay, sldCutoff, sldBeta);
 
-        const tglGeoDepth = buildToggle("Character Mesh", this.showGeoDepth, (v) => {
-            this.showGeoDepth = v;
-            this.updateMeshVisibility();
-        });
+        const topRows = document.createElement("div");
+        Object.assign(topRows.style, { display: "flex", gap: "8px", width: "100%" });
+        topRows.append(step1Box, step2Box);
 
-        const tglSkeleton = buildToggle("Skeleton", this.showSkeleton, (v) => {
+        // --- STEP 3: SURGERY (Grouped Edit Tools & Onion Skin) ---
+        const step3Box = buildStepBox("STEP 3: SURGERY", "#ff4444");
+        Object.assign(step3Box.style, { flexDirection: "column", width: "100%" });
+        
+        const surgeryToolsRow = document.createElement("div");
+        Object.assign(surgeryToolsRow.style, { display: "flex", width: "100%", gap: "16px", justifyContent: "center", alignItems: "center", background: "rgba(0,0,0,0.3)", padding: "6px", borderRadius: "4px" });
+        
+        const tglEditMode = buildToggle("Edit Mode", this.showSkeleton, (v) => {
             this.showSkeleton = v;
             if (this.customSkeletonGroup) this.customSkeletonGroup.visible = this.showSkeleton;
             if (this.pickerGroup) this.pickerGroup.visible = this.showSkeleton;
         });
-
-        const tglMP = buildToggle("MP Points", this.showMPPoints, (v) => this.showMPPoints = v);
+        tglEditMode.style.color = "#ff4444"; 
         
-        const sep = document.createElement("div");
-        sep.innerText = " | ";
-        Object.assign(sep.style, { color: "#666", margin: "0 8px", fontWeight: "bold" });
-
+        const sepSurgery = document.createElement("div"); sepSurgery.innerText = " | "; Object.assign(sepSurgery.style, { color: "#666", fontWeight: "bold" });
+        
         const tglOnion = buildToggle("Onion Skin", this.showOnionSkin, (v) => this.showOnionSkin = v);
-        tglOnion.style.color = "#00d2ff"; // Highlight it in Cyan!
-        
+        tglOnion.style.color = "#00d2ff"; 
         const sldOnionLayers = buildSlider("Layers:", 1, 5, 1, 2, v => this.onionSkinLayers = v);
         const sldOnionStep = buildSlider("Step:", 1, 10, 1, 3, v => this.onionSkinStep = v);
+        
+        surgeryToolsRow.append(tglEditMode, sepSurgery, tglOnion, sldOnionLayers, sldOnionStep);
 
-        topPanel.append(tglGeoDepth, tglOpenPose, tglSkeleton, tglMP, sep, tglOnion, sldOnionLayers, sldOnionStep);
-
-        this.container.appendChild(topPanel);
-
-        // --- Bottom Row 1: Workflow & Sliders ---
-        const controlsRow1 = document.createElement("div");
-        Object.assign(controlsRow1.style, {
-            display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "8px", alignItems: "center"
-        });
-        controlsRow1.append(fileInput, btnLoad, btnSync, this.btnPlay, sldCutoff, sldBeta);
-
-        // --- Bottom Row 2: Tracking Modifiers ---
-        const controlsRow2 = document.createElement("div");
-        Object.assign(controlsRow2.style, {
-            display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "16px", alignItems: "center", marginTop: "4px"
-        });
-        const tglUpper = buildToggle("Upper Body Only", this.upperBodyOnly, (v) => this.upperBodyOnly = v);
-        tglUpper.style.color = "#ffb020"; // Highlight tracking modes
-        const tglFace = buildToggle("Face", this.trackFace, (v) => this.trackFace = v);
-        tglFace.style.color = "#ffb020";
-        const tglHands = buildToggle("Hands", this.trackHands, (v) => this.trackHands = v);
-        tglHands.style.color = "#ffb020";
-        controlsRow2.append(tglUpper, tglHands, tglFace);
-
-        // --- NEW: RANGE & DELETE BUTTONS ---
         const rangeRow = document.createElement("div");
         Object.assign(rangeRow.style, { display: "flex", width: "100%", gap: "8px", justifyContent: "center", marginTop: "4px" });
-        
         const btnIn = createBtn("❲ Set IN (I)", "#006699");
         const btnOut = createBtn("Set OUT (O) ❳", "#006699");
         const btnDel = createBtn("🗑️ Delete Data (D)", "#aa0000");
-        
         btnIn.onclick = () => { this.markInFrame = this.currentFrameIndex; this.updateRangeHighlight(); };
         btnOut.onclick = () => { this.markOutFrame = this.currentFrameIndex; this.updateRangeHighlight(); };
-        // Clear is handled naturally by setting In/Out to the same frame, or pressing Esc
         btnDel.onclick = () => this.deleteData();
-        
         rangeRow.append(btnIn, btnOut, btnDel);
-    
 
-        // --- Bottom Row 3: Timeline Scrubber ---
         const timelineRow = document.createElement("div");
-        Object.assign(timelineRow.style, {
-            display: "flex", width: "100%", gap: "8px", alignItems: "center", marginTop: "4px"
-        });
+        Object.assign(timelineRow.style, { display: "flex", width: "100%", gap: "8px", alignItems: "center" });
         
         this.timeLabel = document.createElement("span");
         this.timeLabel.innerText = "0 / 0 f";
         Object.assign(this.timeLabel.style, { color: "#ccc", fontSize: "11px", minWidth: "70px", whiteSpace: "nowrap" });
         
         this.timelineSlider = document.createElement("input");
-        this.timelineSlider.type = "range";
-        this.timelineSlider.min = 0;
-        this.timelineSlider.max = 100; // Will be overwritten by loadedmetadata
-        this.timelineSlider.step = 0.01;
-        this.timelineSlider.value = 0;
-        this.timelineSlider.className = "mocap-theme-slider"; // Themed slider
+        this.timelineSlider.type = "range"; this.timelineSlider.min = 0; this.timelineSlider.max = 100;
+        this.timelineSlider.step = 0.01; this.timelineSlider.value = 0;
+        this.timelineSlider.className = "mocap-theme-slider";
         Object.assign(this.timelineSlider.style, { width: "100%", margin: "0", zIndex: "2", position: "relative" });
 
-        // --- NEW: SLIDER WRAPPER & TICKS CONTAINER ---
         this.sliderWrap = document.createElement("div");
-        Object.assign(this.sliderWrap.style, { 
-            position: "relative", flexGrow: "1", display: "flex", alignItems: "center", height: "20px" 
-        });
+        Object.assign(this.sliderWrap.style, { position: "relative", flexGrow: "1", display: "flex", alignItems: "center", height: "20px" });
 
         this.ticksContainer = document.createElement("div");
-        Object.assign(this.ticksContainer.style, {
-            position: "absolute", left: "0", top: "0", width: "100%", height: "100%", pointerEvents: "none", zIndex: "1"
-        });
+        Object.assign(this.ticksContainer.style, { position: "absolute", left: "0", top: "0", width: "100%", height: "100%", pointerEvents: "none", zIndex: "1" });
 
-        // --- NEW: RANGE HIGHLIGHT BOX ---
         this.rangeHighlight = document.createElement("div");
         Object.assign(this.rangeHighlight.style, {
-            position: "absolute", left: "0%", width: "0%", top: "6px", height: "8px",
-            backgroundColor: "rgba(0, 210, 255, 0.4)", border: "1px solid #00d2ff",
-            borderRadius: "2px", pointerEvents: "none", display: "none", zIndex: "0"
+            position: "absolute", left: "0%", width: "0%", top: "2px", height: "16px",
+            backgroundColor: "rgba(0, 210, 255, 0.4)", borderRadius: "2px", pointerEvents: "none", display: "none", zIndex: "5"
         });
         this.ticksContainer.appendChild(this.rangeHighlight);
-
         this.sliderWrap.append(this.ticksContainer, this.timelineSlider);
 
-        
-        // Scrubbing Event Triggers (Saves to ComfyUI node properties)
         this.timelineSlider.oninput = (e) => {
             this.isScrubbing = true;
             if (this.videoEl && !this.videoEl.paused) this.videoEl.pause();
-            
             const scrubTime = parseFloat(e.target.value);
             if (this.videoEl) this.videoEl.currentTime = scrubTime;
-            
-            // Log properties for serialization
             this.node.properties.scrubbedTime = scrubTime;
             this.node.properties.scrubbedFrame = Math.round(scrubTime * 30);
         };
-        this.timelineSlider.onchange = (e) => {
-            this.isScrubbing = false; // Scrubbing finished
-        };
+        this.timelineSlider.onchange = () => this.isScrubbing = false;
 
         timelineRow.append(this.timeLabel, this.sliderWrap);
+        step3Box.append(surgeryToolsRow, rangeRow, timelineRow);
 
-        // --- Bottom Row 4: Exporter ---
-        const exportRow = document.createElement("div");
-        Object.assign(exportRow.style, {
-            display: "flex", width: "100%", gap: "8px", alignItems: "center", marginTop: "8px", justifyContent: "center"
-        });
-
+        // --- STEP 4: BAKE & EXPORT ---
+        const step4Box = buildStepBox("STEP 4: BAKE", "#b055ff");
         const glbNameInput = document.createElement("input");
-        glbNameInput.type = "text";
-        glbNameInput.value = "Yedp_Clean_Mocap";
-        glbNameInput.className = "mocap-save-input";
-        Object.assign(glbNameInput.style, { width: "160px" });
-
+        glbNameInput.type = "text"; glbNameInput.value = "Yedp_Clean_Mocap"; glbNameInput.className = "mocap-save-input";
+        Object.assign(glbNameInput.style, { width: "140px" });
         const btnExport = createBtn("💾 Save to Action Director", "#800080");
         
         btnExport.onclick = async () => {
-            btnExport.innerText = "⏳ Baking & Saving...";
-            btnExport.style.background = "#555";
-            
+            btnExport.innerText = "⏳ Baking..."; btnExport.style.background = "#555";
             const success = await this.exportToGLB(glbNameInput.value);
-            
-            if (success) {
-                btnExport.innerText = "✅ Saved!";
-                btnExport.style.background = "#008000";
-            } else {
-                btnExport.innerText = "❌ Error";
-                btnExport.style.background = "#ff0000";
-            }
-            
-            // Reset Button Appearance
-            setTimeout(() => {
-                btnExport.innerText = "💾 Save to Action Director";
-                btnExport.style.background = "#800080";
-            }, 3000);
+            if (success) { btnExport.innerText = "✅ Saved!"; btnExport.style.background = "#008000"; } 
+            else { btnExport.innerText = "❌ Error"; btnExport.style.background = "#ff0000"; }
+            setTimeout(() => { btnExport.innerText = "💾 Save to Action Director"; btnExport.style.background = "#800080"; }, 3000);
         };
+        step4Box.append(glbNameInput, btnExport);
 
-        exportRow.append(glbNameInput, btnExport);
+        const bottomRows = document.createElement("div");
+        Object.assign(bottomRows.style, { display: "flex", gap: "8px", width: "100%" });
+        bottomRows.append(step3Box, step4Box);
 
-        // Build Bottom Panel
-        uiPanel.append(controlsRow1, controlsRow2, rangeRow, timelineRow, exportRow);
+        uiPanel.append(topRows, bottomRows);
         this.container.appendChild(uiPanel);
 
-        // --- NEW: RIGHT TRANSFORM PANEL ---
+        // --- RIGHT TRANSFORM PANEL (Unchanged) ---
         this.transformPanelEl = document.createElement("div");
         Object.assign(this.transformPanelEl.style, {
             position: "absolute", right: "16px", top: "50%", transform: "translateY(-50%)",
@@ -1105,14 +1095,9 @@ class MocapSurgeonViewport {
                 const inp = document.createElement("input");
                 inp.type = "number"; inp.step = k.startsWith('p') ? "0.01" : "1";
                 Object.assign(inp.style, { width: "45px", background: "#111", color: "#fff", border: "1px solid #555", borderRadius: "3px", fontSize: "11px", padding: "2px", textAlign: "right" });
-                
-                // Prevent ComfyUI from capturing keystrokes while typing
                 inp.addEventListener('keydown', e => e.stopPropagation());
                 inp.addEventListener('keyup', e => e.stopPropagation());
-                
-                // When user types a number, apply it immediately
                 inp.onchange = () => this.applyManualTransformFromUI();
-                
                 this.uiTransformInputs[k] = inp;
                 row.appendChild(inp);
             });
@@ -1122,7 +1107,6 @@ class MocapSurgeonViewport {
         this.transformPanelEl.appendChild(buildTransformRow("Pos", ['px', 'py', 'pz']));
         this.transformPanelEl.appendChild(buildTransformRow("Rot", ['rx', 'ry', 'rz']));
         this.container.appendChild(this.transformPanelEl);
-     
 
         // UI Events
         btnLoad.onclick = () => fileInput.click();
@@ -1131,25 +1115,24 @@ class MocapSurgeonViewport {
             const file = e.target.files[0];
             if (!file) return;
             
-            // NEW: Clean up previous motion data globally so the new video starts completely fresh
             this.motionData = {};
-            if (this.ticksContainer) this.ticksContainer.innerHTML = ""; // NEW: Clear visual ticks
+            if (this.ticksContainer) {
+                const existingTicks = this.ticksContainer.querySelectorAll('.mocap-tick');
+                existingTicks.forEach(t => t.remove());
+            }
             this.boneFilters = {};
             this.hipsPosFilter = null;
             this.baseFaceLandmarks = null;
             this.currentFrameIndex = 0;
 
-            // Reset RAW Landmark filters
             this.pose2DFilters = [];
             this.poseWorldFilters = [];
             this.handWorldFilters = { "Left": [], "Right": [] };
             this.hand2DFilters = { "Left": [], "Right": [] };
             this.face2DFilters = [];
             
-            // NOTE: Do not reset this.mpClock to 0 here! It must stay strictly increasing for the lifetime of MediaPipe.
             this.lastVideoTimeMs = -1; 
             
-            // Clean up old object URL if it exists
             if (this.videoEl.src && this.videoEl.src.startsWith('blob:')) {
                 URL.revokeObjectURL(this.videoEl.src);
             }
@@ -1159,7 +1142,6 @@ class MocapSurgeonViewport {
                 console.log(`[Mocap Surgeon] Loaded video: ${file.name}`);
                 if (this.timelineSlider) this.timelineSlider.max = this.videoEl.duration;
                 
-                // Restore serialization properties if they exist within the video bounds
                 if (this.node.properties && this.node.properties.scrubbedTime !== undefined) {
                     if (this.node.properties.scrubbedTime <= this.videoEl.duration) {
                         this.videoEl.currentTime = this.node.properties.scrubbedTime;
@@ -2822,8 +2804,21 @@ class MocapSurgeonViewport {
         }
 
         const fps = 30;
-        const frameIndices = Object.keys(this.motionData).map(Number).sort((a, b) => a - b);
+        
+        // 1. RANGE EXPORT LOGIC: Figure out if we are exporting everything, or just a highlighted chunk
+        let startF = this.markInFrame != null ? this.markInFrame : 0;
+        let endF = this.markOutFrame != null ? this.markOutFrame : Number.MAX_SAFE_INTEGER;
+        if (startF > endF) { let temp = startF; startF = endF; endF = temp; }
+
+        const frameIndices = Object.keys(this.motionData)
+            .map(Number)
+            .filter(f => f >= startF && f <= endF) // Only grab frames inside the IN/OUT brackets
+            .sort((a, b) => a - b);
+            
         if (frameIndices.length === 0) return false;
+        
+        // 2. ZERO-PADDING LOGIC: We need the first exported frame to be exactly at time = 0.0s
+        const exportStartTime = frameIndices[0];
 
         // 1. EXTRACT PURE BONE HIERARCHY
         let originalRootBone = null;
@@ -2898,7 +2893,7 @@ class MocapSurgeonViewport {
             
             frameIndices.forEach(fIdx => {
                 const frame = this.motionData[fIdx];
-                const t = fIdx / fps;
+                const t = (fIdx - exportStartTime) / fps;
 
                 // Hips Position (Index 99)
                 if (mpIdx == 99 && frame.hipsPos && !isNaN(frame.hipsPos.x)) {
