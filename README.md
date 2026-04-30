@@ -32,9 +32,10 @@ https://github.com/user-attachments/assets/9e7d56c9-e2cd-4ff6-a505-93e4eabae959
 
 <img width="105" height="94" alt="image" src="https://github.com/user-attachments/assets/de1eec41-84ea-4c8f-94b3-74e25b3d0ac0" />
 
-## **🩻 Yedp Mocap Surgeon**
+## **⚕️ Yedp Mocap Surgeon**
 
-<img width="839" height="867" alt="image" src="https://github.com/user-attachments/assets/6f4d7311-8723-4e43-92f8-ccf2b85503c5" />
+<img width="979" height="824" alt="a31d6b0750f308f97478e1f4379d62f3" src="https://github.com/user-attachments/assets/ee6992fb-853d-4ade-9513-78def709faa9" />
+
 
 A dedicated, interactive companion node for extracting, cleaning, and surgically editing motion capture data directly from video plates within ComfyUI. 
 
