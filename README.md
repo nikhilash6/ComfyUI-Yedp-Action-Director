@@ -32,6 +32,28 @@ https://github.com/user-attachments/assets/9e7d56c9-e2cd-4ff6-a505-93e4eabae959
 
 <img width="105" height="94" alt="image" src="https://github.com/user-attachments/assets/de1eec41-84ea-4c8f-94b3-74e25b3d0ac0" />
 
+## **🩻 Yedp Mocap Surgeon**
+
+<img width="839" height="867" alt="image" src="https://github.com/user-attachments/assets/6f4d7311-8723-4e43-92f8-ccf2b85503c5" />
+
+A dedicated, interactive companion node for extracting, cleaning, and surgically editing motion capture data directly from video plates within ComfyUI. 
+
+Instead of relying on jittery raw AI outputs, Mocap Surgeon provides a professional 3D cleanup environment inspired by traditional animation software, allowing you to polish tracking data before it ever hits your rendering pipeline.
+
+### **✨ Surgeon Key Features**
+* **Local Video AI Tracking:** Integrated MediaPipe Pose, Hand, and 70-point Face Landmarkers running entirely locally.
+* **1-Euro Jitter Filtering:** Professional-grade mathematical smoothing. Dial in exactly how much "Base Smoothing" you need for stability, and how much "Action Speed" you need to capture snappy movements like punches or kicks without lag.
+* **Surgical Manual Override:** Pause the video, click any 3D joint, and use standard `G` (Translate) and `R` (Rotate) gizmos to fix tracking errors. The engine automatically utilizes pristine-backup Slerp-blending to seamlessly merge your manual fixes back into the raw AI tracking data without popping.
+* **Time-Travel Onion Skinning:** Toggle a 3D constellation overlay that draws glowing ghost frames of the skeleton's past (Red) and future (Green) trajectories to aid in precise frame-by-frame posing.
+* **Premiere-Style Range Editing:** Use `I` (In) and `O` (Out) hotkeys to isolate specific sections of the timeline. Press `D` to instantly delete bad tracking data or wipe manual mistakes across a targeted range.
+* **Smart Range Baking:** Export clean, Mixamo-compatible `.glb` animations directly to your Action Director folders. Range exporting automatically zero-pads your clips, so grabbing a 3-second kick out of a 5-minute video exports a perfectly timed, ready-to-use asset.
+
+### **🛠️ The 4-Step Surgical Workflow**
+1. **LOAD VIDEO:** Import your video, sync the camera FOV, and toggle Face or Hands tracking.
+2. **PLAY & FILTER:** Play the video to cache the AI tracking, and dial in the smoothing sliders.
+3. **SURGERY:** Use the Edit Mode, timeline Scrubber, and Onion Skin to manually correct clipping limbs, twisted shoulders, or missed steps.
+4. **BAKE:** Select your perfect range and save the `.glb` animation directly to your disk.
+
 ## **🚀 What's New in V9.3 (Path Tracing, HDRI, Gaussian Splatting & Workflow Upgrades)**
 
 ### **✨ Physically Based Rendering & Lighting**
