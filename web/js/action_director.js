@@ -1412,7 +1412,7 @@ class YedpViewport {
         this.characters.forEach(c => c.scene.updateMatrixWorld(true));
         this.environments.forEach(e => e.group.updateMatrixWorld(true));
         
-        if (this.controls) this.controls.update();
+        if (this.controls && !this.isCameraOverride) this.controls.update();
 
         // --- NEW: Path Tracer Update Flags ---
         this.needsPtReset = true;
@@ -2172,7 +2172,16 @@ class YedpViewport {
         Object.assign(selCamAnim.style, { flex: "1", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px" });
         this.availableCams.forEach(anim => selCamAnim.add(new Option(anim, anim))); 
         selCamAnim.onchange = (e) => { this.loadCameraAnim(e.target.value); };
-        camImportRow.append(lblOverride, selCamAnim);
+
+        // NEW: Upload Camera Button
+        const uploadCamBtn = this.createUploadButton("Upload Custom Camera", ".glb,.fbx", "yedp_cams", async (filename) => {
+            if (!this.availableCams.includes(filename)) this.availableCams.push(filename);
+            selCamAnim.add(new Option(filename, filename));
+            selCamAnim.value = filename;
+            await this.loadCameraAnim(filename);
+        });
+
+        camImportRow.append(lblOverride, selCamAnim, uploadCamBtn);
 
         const camImportFixRow = document.createElement("div");
         Object.assign(camImportFixRow.style, { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px", marginTop: "4px" });
@@ -3161,7 +3170,14 @@ class YedpViewport {
         
         const isFBX = filename.toLowerCase().endsWith(".fbx");
         const loader = isFBX ? new this.FBXLoader() : new this.GLTFLoaderClass();
-        const rigUrl = new URL(`../${filename}?t=${Date.now()}`, this.baseUrl).href;
+        let rigUrl;
+        if (filename === "Yedp_Rig.glb") {
+            // Default rig is stored in the extension's web folder
+            rigUrl = new URL(`../${filename}?t=${Date.now()}`, this.baseUrl).href;
+        } else {
+            // Custom rigs are in the ComfyUI input folder, requested via API
+            rigUrl = `/view?filename=${encodeURIComponent(filename)}&type=input&subfolder=yedp_rigs&t=${Date.now()}`;
+        }
         
         try {
             console.log("[Yedp] Loading Rig from:", rigUrl);
@@ -3531,15 +3547,26 @@ class YedpViewport {
             meshInfo.id = `env-mesh-info-${e.id}`;
             meshInfo.innerText = `[Meshes: ${e.meshes.length}]`;
             
+            // NEW: Upload Env Layout
+            const envRow = document.createElement("div");
+            envRow.style.display = "flex"; envRow.style.alignItems = "center"; envRow.style.marginBottom = "4px";
+            
             const selEnv = document.createElement("select");
-            Object.assign(selEnv.style, { width: "100%", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px", marginBottom: "4px" });
+            Object.assign(selEnv.style, { flex: "1", width: "0", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px" });
             this.availableEnvs.forEach(env => selEnv.add(new Option(env, env)));
             selEnv.value = e.envFile;
             selEnv.onchange = (evt) => this.loadEnvironmentFile(e, evt.target.value);
             
-            card.append(head, meshInfo, selEnv);
+            const uploadEnvBtn = this.createUploadButton("Upload Custom Env", ".glb,.fbx,.ply,.splat,.ksplat", "yedp_envs", async (filename) => {
+                if (!this.availableEnvs.includes(filename)) this.availableEnvs.push(filename);
+                selEnv.add(new Option(filename, filename));
+                selEnv.value = filename;
+                await this.loadEnvironmentFile(e, filename);
+            });
+            
+            envRow.append(selEnv, uploadEnvBtn);
+            card.append(head, meshInfo, envRow);
 
-            // Dynamically inject Splat Toggle UI for PLY pointclouds
             if (e.envFile && e.envFile.toLowerCase().endsWith(".ply")) {
                 const splatRow = document.createElement("div");
                 splatRow.style.display = "flex"; splatRow.style.alignItems = "center"; splatRow.style.gap = "4px"; splatRow.style.marginBottom = "4px";
@@ -3581,6 +3608,63 @@ class YedpViewport {
         this.refreshSidebarHighlights();
     }
 
+    createUploadButton(tooltip, accept, subfolder, onUploaded) {
+        const wrap = document.createElement("div");
+        wrap.style.display = "flex";
+        
+        const btn = document.createElement("button");
+        btn.innerText = "📁";
+        btn.title = tooltip;
+        Object.assign(btn.style, { 
+            background: "#222", color: "#fff", border: "1px solid #444", 
+            borderRadius: "3px", cursor: "pointer", fontSize: "10px", 
+            padding: "2px 4px", marginLeft: "4px", flex: "none" 
+        });
+        
+        const fileIn = document.createElement("input");
+        fileIn.type = "file"; 
+        fileIn.accept = accept; 
+        fileIn.style.display = "none";
+        
+        btn.onclick = (e) => { e.stopPropagation(); fileIn.click(); };
+        fileIn.onchange = async (e) => {
+            const f = e.target.files[0];
+            if (!f) return;
+            const origText = btn.innerText;
+            btn.innerText = "⏳";
+            btn.style.background = "#552"; // Visual feedback during upload
+            
+            const filename = await this.uploadCustomAsset(f, subfolder);
+            
+            btn.innerText = origText;
+            btn.style.background = "#222";
+            if (filename) onUploaded(filename);
+            fileIn.value = ""; // Reset input so the same file can be uploaded again if needed
+        };
+        
+        wrap.append(btn, fileIn);
+        return wrap;
+    }
+
+    async uploadCustomAsset(file, subfolder) {
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("subfolder", subfolder);
+        
+        try {
+            const res = await api.fetchApi("/yedp/upload_asset", {
+                method: "POST",
+                body: formData
+            });
+            const data = await res.json();
+            return data.filename; 
+        } catch (e) {
+            console.error("[Yedp] Custom Upload failed:", e);
+            alert("Upload failed! Ensure your Python backend has the /yedp/upload_asset route configured.");
+            return null;
+        }
+    }
+
     // --- LOGIC: CHARACTERS ---
     renderCharacterCards() {
         this.uiCharList.innerHTML = "";
@@ -3611,7 +3695,7 @@ class YedpViewport {
             
             // RIG SWAP UI
             const selRigRow = document.createElement("div");
-            selRigRow.style.display = "flex"; selRigRow.style.alignItems = "center"; selRigRow.style.gap = "4px"; selRigRow.style.marginBottom = "4px";
+            selRigRow.style.display = "flex"; selRigRow.style.alignItems = "center"; selRigRow.style.marginBottom = "4px";
             const rigLbl = document.createElement("span");
             rigLbl.innerText = "Model:"; rigLbl.style.fontSize = "9px"; rigLbl.style.color = "#888"; rigLbl.style.width = "35px";
             const selRig = document.createElement("select");
@@ -3619,7 +3703,16 @@ class YedpViewport {
             this.availableRigs.forEach(r => selRig.add(new Option(r, r)));
             selRig.value = c.rigFile;
             selRig.onchange = (e) => { e.stopPropagation(); this.swapCharacterRig(c.id, e.target.value); };
-            selRigRow.append(rigLbl, selRig);
+            
+            // NEW: Upload Rig Button
+            const uploadRigBtn = this.createUploadButton("Upload Custom Rig", ".glb,.fbx", "yedp_rigs", async (filename) => {
+                if (!this.availableRigs.includes(filename)) this.availableRigs.push(filename);
+                selRig.add(new Option(filename, filename));
+                selRig.value = filename;
+                await this.swapCharacterRig(c.id, filename);
+            });
+
+            selRigRow.append(rigLbl, selRig, uploadRigBtn);
 
             // MULTI-CLIP SEQUENCER UI
             const seqWrap = document.createElement("div");
@@ -3632,7 +3725,7 @@ class YedpViewport {
 
             c.animSequence.forEach((item, index) => {
                 const row = document.createElement("div");
-                row.style.display = "flex"; row.style.gap = "4px"; row.style.alignItems = "center";
+                row.style.display = "flex"; row.style.alignItems = "center";
                 
                 const idxLbl = document.createElement("span");
                 idxLbl.innerText = `${index + 1}.`;
@@ -3644,9 +3737,17 @@ class YedpViewport {
                 selAnim.value = item.file;
                 selAnim.onchange = (e) => this.loadSequenceAnim(c, item, e.target.value);
                 
+                // NEW: Upload Anim Button
+                const uploadAnimBtn = this.createUploadButton("Upload Custom Anim", ".glb,.fbx,.bvh", "yedp_anims", async (filename) => {
+                    if (!this.availableAnimations.includes(filename)) this.availableAnimations.push(filename);
+                    selAnim.add(new Option(filename, filename));
+                    selAnim.value = filename;
+                    await this.loadSequenceAnim(c, item, filename);
+                });
+
                 const btnDelSeq = document.createElement("button");
                 btnDelSeq.innerText = "X";
-                Object.assign(btnDelSeq.style, { background: "#622", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px", padding: "2px 4px" });
+                Object.assign(btnDelSeq.style, { background: "#622", color: "#fff", border: "1px solid #555", borderRadius: "2px", cursor: "pointer", fontSize: "9px", padding: "2px 4px", marginLeft: "4px" });
                 btnDelSeq.onclick = (evt) => {
                     evt.stopPropagation();
                     c.animSequence = c.animSequence.filter(a => a.id !== item.id);
@@ -3656,7 +3757,7 @@ class YedpViewport {
                     this.forceUpdateFrame();
                 };
                 
-                row.append(idxLbl, selAnim, btnDelSeq);
+                row.append(idxLbl, selAnim, uploadAnimBtn, btnDelSeq);
                 seqWrap.appendChild(row);
             });
 
@@ -3693,7 +3794,6 @@ class YedpViewport {
             
             blendRow.append(bLbl, bSld, bInp);
             seqWrap.appendChild(blendRow);
-            // END MULTI-CLIP UI
             
             const faceScaleRow = document.createElement("div");
             faceScaleRow.style.display = "flex"; faceScaleRow.style.alignItems = "center"; faceScaleRow.style.gap = "4px"; faceScaleRow.style.marginBottom = "4px";
