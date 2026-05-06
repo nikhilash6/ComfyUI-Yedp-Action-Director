@@ -21,6 +21,10 @@ if "yedp_envs" not in folder_paths.folder_names_and_paths:
 if "yedp_cams" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_cams"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_cams")], {".glb", ".fbx"})
 
+# NEW: Added rigs to the configuration so uploads have a dedicated folder
+if "yedp_rigs" not in folder_paths.folder_names_and_paths:
+    folder_paths.folder_names_and_paths["yedp_rigs"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_rigs")], {".glb", ".gltf", ".fbx"})
+
 if "yedp_mocap" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_mocap"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_mocap")], {".json"})
 
@@ -164,6 +168,60 @@ class YedpMocapSurgeon:
 
 
 # --- API ROUTES ---
+
+# NEW: Upload Route for General Custom Assets
+@PromptServer.instance.routes.post("/yedp/upload_asset")
+async def upload_asset(request):
+    try:
+        reader = await request.multipart()
+        subfolder = "yedp_envs" # Fallback
+        filename = "uploaded_asset.glb"
+        file_path = None
+        
+        async for field in reader:
+            if field.name == 'subfolder':
+                subfolder = (await field.read()).decode('utf-8')
+            elif field.name == 'file':
+                if field.filename:
+                    filename = field.filename
+                
+                # Sanitize filename
+                safe_name = "".join([c for c in filename if c.isalnum() or c in [' ', '_', '.', '-']]).rstrip()
+                
+                # Verify subfolder exists in paths to prevent saving outside allowed directories
+                if subfolder not in folder_paths.folder_names_and_paths:
+                    return web.json_response({"status": "error", "message": "Invalid subfolder configuration"}, status=400)
+                
+                # --- SYMLINK FIX INTEGRATED HERE ---
+                target_dir = folder_paths.folder_names_and_paths[subfolder][0][0]
+                target_dir = os.path.realpath(target_dir) # Resolves Windows/Linux Symlinks perfectly
+                try:
+                    os.makedirs(target_dir, exist_ok=True)
+                except Exception as e:
+                    pass # Symlink likely already exists and handles the routing
+                # -----------------------------------
+                
+                file_path = os.path.join(target_dir, safe_name)
+                
+                # Stream the file in chunks (saves system RAM for large files)
+                with open(file_path, "wb") as f:
+                    while True:
+                        chunk = await field.read_chunk()
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                
+        if not file_path:
+            return web.json_response({"status": "error", "message": "No file received"}, status=400)
+            
+        print(f"[Yedp] Successfully uploaded asset to {file_path}")
+        return web.json_response({"status": "success", "filename": safe_name})
+        
+    except Exception as e:
+        print(f"[Yedp] Failed to upload asset: {e}")
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+
 @PromptServer.instance.routes.get("/yedp/get_hdris")
 async def get_hdris(request):
     files = folder_paths.get_filename_list("yedp_hdri")
@@ -243,7 +301,11 @@ async def save_scene(request):
             safe_name += ".json"
 
         scene_dir = folder_paths.folder_names_and_paths["yedp_scenes"][0][0]
-        os.makedirs(scene_dir, exist_ok=True)
+        scene_dir = os.path.realpath(scene_dir) # Resolves Windows Symlinks perfectly
+        try:
+            os.makedirs(scene_dir, exist_ok=True)
+        except Exception as e:
+            pass # Symlink likely already exists and handles the routing
         
         file_path = os.path.join(scene_dir, safe_name)
         
@@ -307,11 +369,20 @@ async def upload_payload_finish(request):
 
 @PromptServer.instance.routes.get("/yedp/get_rigs")
 async def get_rigs(request):
+    # Retrieve user-uploaded rigs from the input directory
+    files = folder_paths.get_filename_list("yedp_rigs")
+    if not files:
+        files = []
+        
+    # Add legacy/default rigs from the web folder
     web_dir = os.path.join(os.path.dirname(__file__), "web")
-    if not os.path.exists(web_dir):
-        return web.json_response({"files": ["Yedp_Rig.glb"]})
+    if os.path.exists(web_dir):
+        web_files = [f for f in os.listdir(web_dir) if f.lower().endswith(('.glb', '.gltf', '.fbx'))]
+        for wf in web_files:
+            if wf not in files:
+                files.append(wf)
     
-    files = [f for f in os.listdir(web_dir) if f.lower().endswith(('.glb', '.gltf', '.fbx'))]
+    # Guarantee the fallback default rig is always present
     if "Yedp_Rig.glb" not in files:
         files.insert(0, "Yedp_Rig.glb")
         
@@ -346,7 +417,11 @@ async def upload_glb(request):
             safe_name += ".glb"
             
         anim_dir = folder_paths.folder_names_and_paths["yedp_anims"][0][0]
-        os.makedirs(anim_dir, exist_ok=True)
+        anim_dir = os.path.realpath(anim_dir)
+        try:
+            os.makedirs(anim_dir, exist_ok=True)
+        except Exception as e:
+            pass
         
         file_path = os.path.join(anim_dir, safe_name)
         
