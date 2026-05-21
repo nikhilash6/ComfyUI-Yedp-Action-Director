@@ -61,7 +61,9 @@ const loadThreeJS = async () => {
             const ptLib = await import(new URL("./three-gpu-pathtracer.module.js?t=" + Date.now(), baseUrl).href);
             // ---------------------------------
             
-            resolve({ THREE, OrbitControls, TransformControls, GLTFLoader, FBXLoader, BVHLoader, PLYLoader, HDRLoader, SkeletonUtils: { clone }, DropInViewer, bvhLib, ptLib });
+            const { GLTFExporter } = await import(new URL("./GLTFExporter.js", baseUrl).href);
+
+            resolve({ THREE, OrbitControls, TransformControls, GLTFLoader, FBXLoader, BVHLoader, PLYLoader, HDRLoader, SkeletonUtils: { clone }, DropInViewer, bvhLib, ptLib, GLTFExporter });
             
         } catch (e) {
             console.error("[Yedp] Critical Engine Load Failure:", e);
