@@ -28,8 +28,8 @@ if "yedp_rigs" not in folder_paths.folder_names_and_paths:
 if "yedp_mocap" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_mocap"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_mocap")], {".json"})
 
-if "yedp_scenes" not in folder_paths.folder_names_and_paths:
-    folder_paths.folder_names_and_paths["yedp_scenes"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_scenes")], {".json"})
+if "yedp_blockout" not in folder_paths.folder_names_and_paths:
+    folder_paths.folder_names_and_paths["yedp_blockout"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_blockout")], {".json"})
 
 if "yedp_hdri" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_hdri"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_hdri")], {".hdr", ".exr"})
@@ -148,6 +148,7 @@ class YedpMocapSurgeon:
 
     @classmethod
     def INPUT_TYPES(cls):
+
         return {
             "required": {
                 "info": ("STRING", {"default": "Frontend visualization tool. No backend execution required.", "multiline": True}),
@@ -164,6 +165,36 @@ class YedpMocapSurgeon:
 
     def run(self, info="", unique_id=None):
         # Mocap Surgeon does all its work in the browser, so it just passes through on execution.
+        return ()
+
+
+class YedpBlockout:
+    """
+    ComfyUI-Yedp-Blockout
+    Minimal 3D blockout viewport for scene layout and composition.
+    All rendering and interaction happens in the browser frontend.
+    """
+    def __init__(self):
+        self.type = "output"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "info": ("STRING", {"default": "Blockout viewport. All interaction happens in the browser.", "multiline": False}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            }
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "run"
+    CATEGORY = "Yedp/Blockout"
+    OUTPUT_NODE = True
+    DESCRIPTION = "Minimal 3D viewport for blockout and scene composition."
+
+    def run(self, info="", unique_id=None):
         return ()
 
 
@@ -283,7 +314,7 @@ async def save_mocap(request):
 
 @PromptServer.instance.routes.get("/yedp/get_scenes")
 async def get_scenes(request):
-    files = folder_paths.get_filename_list("yedp_scenes")
+    files = folder_paths.get_filename_list("yedp_blockout")
     if not files:
         files = []
     return web.json_response({"files": files})
@@ -300,7 +331,7 @@ async def save_scene(request):
         if not safe_name.endswith(".json"):
             safe_name += ".json"
 
-        scene_dir = folder_paths.folder_names_and_paths["yedp_scenes"][0][0]
+        scene_dir = folder_paths.folder_names_and_paths["yedp_blockout"][0][0]
         scene_dir = os.path.realpath(scene_dir) # Resolves Windows Symlinks perfectly
         try:
             os.makedirs(scene_dir, exist_ok=True)
