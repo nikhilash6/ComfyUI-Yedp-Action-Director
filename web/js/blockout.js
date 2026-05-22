@@ -5,8 +5,8 @@ import { app } from "/scripts/app.js";
  * Reuses THREE.js, OrbitControls, and TransformControls from Action Director's shared libs.
  *
  * Object management data structure:
- *   sceneObjects = [{ id, name, type, mesh, visible }]
- *   selectedObjectId = number | null
+ * sceneObjects = [{ id, name, type, mesh, visible }]
+ * selectedObjectId = number | null
  */
 
 const loadThreeJS = async () => {
@@ -149,6 +149,19 @@ class BlockoutViewport {
                 flex: "1 1 0", position: "relative", overflow: "hidden", background: "#1a1a1a"
             });
             centerColDiv.appendChild(viewportDiv);
+
+            // Resolution Gate Overlay
+            this.gate = document.createElement("div");
+            this.gate.className = "yedp-resolution-gate";
+            Object.assign(this.gate.style, {
+                position: "absolute", top: "50%", left: "50%",
+                transform: "translate(-50%, -50%)",
+                border: "2px solid rgba(255, 255, 255, 0.4)",
+                boxShadow: "0 0 0 9999px rgba(0, 0, 0, 0.7)",
+                pointerEvents: "none", zIndex: "5", display: "none"
+            });
+            viewportDiv.appendChild(this.gate);
+            this.showResolutionGate = false;
 
             const bottomPanelDiv = document.createElement("div");
             bottomPanelDiv.className = "blockout-creation-panel";
@@ -323,15 +336,26 @@ class BlockoutViewport {
     /**
      * Add a new object to the scene.
      * @param {string} type - Object type (currently only "cube")
+     * @param {boolean} autoSelect - Fix for TransformControls attachment thrashing during load
      * @returns {object} The created scene object entry
      */
-    addObject(type = "cube", importedMesh = null, importedName = null) {
+    addObject(type = "cube", importedMesh = null, importedName = null, autoSelect = true) {
         this.objectIdCounter++;
         const id = this.objectIdCounter;
 
         let mesh;
         if (importedMesh) {
             mesh = importedMesh;
+            
+            // --- NEW FIX: Purge any corrupt wireframes baked into old save files ---
+            const lingeringOverlays = [];
+            mesh.traverse(c => {
+                if (c.userData && c.userData.isWireframeOverlay) lingeringOverlays.push(c);
+            });
+            lingeringOverlays.forEach(c => {
+                if (c.parent) c.parent.remove(c);
+            });
+
             mesh.traverse(c => {
                 if (c.isMesh) {
                     c.castShadow = true;
@@ -377,8 +401,8 @@ class BlockoutViewport {
             hole.absarc(0, 0, 0.4, 0, Math.PI * 2, true);
             outer.holes.push(hole);
             const geo = new this.THREE.ExtrudeGeometry(outer, { depth: 1, bevelEnabled: false, curveSegments: 32 });
-            geo.translate(0, 0, -0.5); // Center on Z
-            geo.rotateX(Math.PI / 2); // Stand up on Y
+            geo.translate(0, 0, -0.5); 
+            geo.rotateX(Math.PI / 2); 
             const mat = new this.THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4, metalness: 0.1, side: this.THREE.DoubleSide });
             mesh = new this.THREE.Mesh(geo, mat);
             mesh.castShadow = true;
@@ -387,7 +411,7 @@ class BlockoutViewport {
             const geo = new this.THREE.TorusGeometry(0.5, 0.2, 16, 100);
             const mat = new this.THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4, metalness: 0.1 });
             mesh = new this.THREE.Mesh(geo, mat);
-            mesh.rotation.x = -Math.PI / 2; // Lie flat on floor
+            mesh.rotation.x = -Math.PI / 2; 
             mesh.castShadow = true;
             mesh.receiveShadow = true;
         } else if (type === "pointlight") {
@@ -436,7 +460,6 @@ class BlockoutViewport {
             light.target = target;
         }
 
-        // Position in front of camera only for fresh primitives
         if (!importedMesh) {
             const dist = 3;
             const dir = new this.THREE.Vector3();
@@ -445,10 +468,8 @@ class BlockoutViewport {
             if (mesh.position.y < 0.5) mesh.position.y = 0.5;
         }
 
-        // Tag the mesh with the scene object ID for reverse lookup
         mesh.userData.blockoutId = id;
 
-        // Auto name: Type_Count
         const typeCount = this.sceneObjects.filter(o => o.type === type).length + 1;
         const formattedCount = typeCount < 10 ? `0${typeCount}` : typeCount;
         const typeNameStr = importedName ? importedName.split('.')[0] : type.charAt(0).toUpperCase() + type.slice(1);
@@ -458,11 +479,11 @@ class BlockoutViewport {
         this.sceneObjects.push(entry);
         this.scene.add(mesh);
 
-        // Auto-select the new object
-        this.selectObjectById(id);
+        if (autoSelect) {
+            this.selectObjectById(id);
+        }
 
         this.refreshOutliner();
-        console.log(`[Yedp Blockout] Added object: ${name} (id=${id})`);
         return entry;
     }
 
@@ -1098,20 +1119,27 @@ class BlockoutViewport {
         if (isMesh) {
             this.propInputs.colorSection.style.display = 'block';
             if (document.activeElement !== this.propInputs.color) {
-                if (m.material && m.material.color) {
-                    this.propInputs.color.value = '#' + m.material.color.getHexString();
+                let firstColor = null;
+                if (Array.isArray(m.material)) {
+                    const matWithColor = m.material.find(mat => mat && mat.color && typeof mat.color.getHexString === 'function');
+                    if (matWithColor) firstColor = matWithColor.color;
+                } else if (m.material && m.material.color && typeof m.material.color.getHexString === 'function') {
+                    firstColor = m.material.color;
                 } else if (m.children && m.children.length > 0) {
-                    let firstColor = null;
                     m.traverse(c => {
-                        if (!firstColor && c.isMesh && c.material && c.material.color) {
-                            firstColor = c.material.color;
+                        if (!firstColor && c.isMesh && c.material) {
+                            if (Array.isArray(c.material)) {
+                                const mc = c.material.find(mat => mat && mat.color && typeof mat.color.getHexString === 'function');
+                                if (mc) firstColor = mc.color;
+                            } else if (c.material.color && typeof c.material.color.getHexString === 'function') {
+                                firstColor = c.material.color;
+                            }
                         }
                     });
-                    if (firstColor) {
-                        this.propInputs.color.value = '#' + firstColor.getHexString();
-                    } else {
-                        this.propInputs.color.value = '#ffffff';
-                    }
+                }
+                
+                if (firstColor) {
+                    this.propInputs.color.value = '#' + firstColor.getHexString();
                 } else {
                     this.propInputs.color.value = '#ffffff';
                 }
@@ -1363,8 +1391,17 @@ class BlockoutViewport {
         btnLoad.onmouseover = () => { btnLoad.style.background = "#555"; btnLoad.style.borderColor = "#00d2ff"; };
         btnLoad.onmouseout = () => { btnLoad.style.background = "#333"; btnLoad.style.borderColor = "#555"; };
         btnLoad.onclick = () => this.loadScene();
+        const btnBake = document.createElement("button");
+        btnBake.innerText = "SEND TO GRAPH";
+        Object.assign(btnBake.style, {
+            background: "transparent", color: "#ffaa00", border: "1px solid #ffaa00", borderRadius: "3px",
+            padding: "4px 8px", fontSize: "10px", cursor: "pointer", fontWeight: "bold", textTransform: "uppercase"
+        });
+        btnBake.onmouseover = () => { btnBake.style.background = "rgba(255, 170, 0, 0.2)"; };
+        btnBake.onmouseout = () => { btnBake.style.background = "transparent"; };
+        btnBake.onclick = () => this.performBake(btnBake);
 
-        scenePanel.append(btnSave, btnLoad);
+        scenePanel.append(btnSave, btnLoad, btnBake);
         vpDiv.appendChild(scenePanel);
 
         // Gizmo Toolbar
@@ -1434,15 +1471,24 @@ class BlockoutViewport {
         const modeWrap = document.createElement("div");
         Object.assign(modeWrap.style, { display: "flex", gap: "4px" });
         
-        const updateModes = () => {
-            btnWire.style.background = this.showWireframe ? "#00d2ff" : "#333";
-            btnWire.style.color = this.showWireframe ? "#000" : "#ccc";
-            btnShaded.style.background = this.displayMode === 'shaded' ? "#00d2ff" : "#333";
-            btnShaded.style.color = this.displayMode === 'shaded' ? "#000" : "#ccc";
-            btnTex.style.background = this.displayMode === 'textured' ? "#00d2ff" : "#333";
-            btnTex.style.color = this.displayMode === 'textured' ? "#000" : "#ccc";
-            btnPerson.style.background = this.sizeRefVisible ? "#00d2ff" : "#333";
-            btnPerson.style.color = this.sizeRefVisible ? "#000" : "#ccc";
+        this.toolbarBtns = {};
+        
+        this.updateToolbarUI = () => {
+            if (!this.toolbarBtns.wire) return;
+            this.toolbarBtns.wire.style.background = this.showWireframe ? "#00d2ff" : "#333";
+            this.toolbarBtns.wire.style.color = this.showWireframe ? "#000" : "#ccc";
+            this.toolbarBtns.shaded.style.background = this.displayMode === 'shaded' ? "#00d2ff" : "#333";
+            this.toolbarBtns.shaded.style.color = this.displayMode === 'shaded' ? "#000" : "#ccc";
+            this.toolbarBtns.tex.style.background = this.displayMode === 'textured' ? "#00d2ff" : "#333";
+            this.toolbarBtns.tex.style.color = this.displayMode === 'textured' ? "#000" : "#ccc";
+            if (this.toolbarBtns.gate) {
+                this.toolbarBtns.gate.style.background = this.showResolutionGate ? "#00d2ff" : "#333";
+                this.toolbarBtns.gate.style.color = this.showResolutionGate ? "#000" : "#ccc";
+            }
+            if (this.toolbarBtns.person) {
+                this.toolbarBtns.person.style.background = this.sizeRefVisible ? "#00d2ff" : "#333";
+                this.toolbarBtns.person.style.color = this.sizeRefVisible ? "#000" : "#ccc";
+            }
             this.updateDisplayMode();
         };
 
@@ -1463,18 +1509,30 @@ class BlockoutViewport {
         const svgWire = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg>`;
         const svgShaded = `<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>`;
         const svgTex = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 1 0 10 10h-10v-10z"/></svg>`;
+        const svgGate = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h4m14 0h-4M3 19h4m14 0h-4M5 3v4m0 14v-4m14-14v4m0 14v-4"/></svg>`;
         const svgPerson = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/><path d="M12 6v8M8 10h8M12 14l-4 8M12 14l4 8"/></svg>`;
 
-        const btnWire = createIconBtn(svgWire, "Wireframe Toggle", () => { this.showWireframe = !this.showWireframe; updateModes(); });
-        const btnShaded = createIconBtn(svgShaded, "Shaded Mode", () => { this.displayMode = "shaded"; updateModes(); });
-        const btnTex = createIconBtn(svgTex, "Textured Mode", () => { this.displayMode = "textured"; updateModes(); });
+        const btnWire = createIconBtn(svgWire, "Wireframe Toggle", () => { this.showWireframe = !this.showWireframe; this.updateToolbarUI(); });
+        const btnShaded = createIconBtn(svgShaded, "Shaded Mode", () => { this.displayMode = "shaded"; this.updateToolbarUI(); });
+        const btnTex = createIconBtn(svgTex, "Textured Mode", () => { this.displayMode = "textured"; this.updateToolbarUI(); });
         modeWrap.append(btnWire, btnShaded, btnTex);
+        this.toolbarBtns.wire = btnWire;
+        this.toolbarBtns.shaded = btnShaded;
+        this.toolbarBtns.tex = btnTex;
+
+        // Resolution Gate Toggle
+        const gateWrap = document.createElement("div");
+        Object.assign(gateWrap.style, { display: "flex", alignItems: "center", borderLeft: "1px solid #555", paddingLeft: "10px" });
+        const btnGate = createIconBtn(svgGate, "Resolution Gate", () => { this.showResolutionGate = !this.showResolutionGate; this.updateResolutionGate(); this.updateToolbarUI(); });
+        gateWrap.appendChild(btnGate);
+        this.toolbarBtns.gate = btnGate;
 
         // Size Reference Toggle
         const sizeWrap = document.createElement("div");
         Object.assign(sizeWrap.style, { display: "flex", alignItems: "center", borderLeft: "1px solid #555", paddingLeft: "10px" });
-        const btnPerson = createIconBtn(svgPerson, "Size Reference (1.68m)", () => { this.toggleSizeReference(); updateModes(); });
+        const btnPerson = createIconBtn(svgPerson, "Size Reference (1.68m)", () => { this.toggleSizeReference(); this.updateToolbarUI(); });
         sizeWrap.appendChild(btnPerson);
+        this.toolbarBtns.person = btnPerson;
 
         // 2. Depth Mode
         this.isDepthMode = false;
@@ -1512,24 +1570,26 @@ class BlockoutViewport {
 
         depthWrap.append(chkDepth, lblDepth, lblNear, inpNear, lblFar, inpFar);
         
-        bar.append(modeWrap, sizeWrap, depthWrap);
+        bar.append(modeWrap, gateWrap, sizeWrap, depthWrap);
         vpDiv.appendChild(bar);
 
-        updateModes();
+        this.propInputs.depthCheck = chkDepth;
+        this.propInputs.depthNear = inpNear;
+        this.propInputs.depthFar = inpFar;
+
+        this.updateToolbarUI();
     }
 
     updateDisplayMode() {
-        const isWireframe = this.showWireframe;
-
         this.sceneObjects.forEach(o => {
             if (['cube', 'plane', 'sphere', 'cone', 'cylinder', 'pipe', 'torus', 'imported'].includes(o.type)) {
-                // 1. Skip wireframe child meshes and update original material
+                // 1. Safely register original materials, explicitly skipping any wireframe overlays
                 o.mesh.traverse(c => {
-                    if (c.isMesh && c.material && c.material.wireframe && c.userData.isWireframeOverlay) return;
+                    if (c.userData && c.userData.isWireframeOverlay) return;
                     if (c.isMesh && !c.userData.originalMaterial) c.userData.originalMaterial = c.material;
                 });
                 
-                // 2. Handle wireframe overlay
+                // 2. Handle wireframe overlay creation
                 if (this.showWireframe && !o.mesh.userData.wireframeMeshList) {
                     const wireMat = new this.THREE.MeshBasicMaterial({ 
                         color: 0x00d2ff, wireframe: true, transparent: true, opacity: 0.8,
@@ -1538,6 +1598,7 @@ class BlockoutViewport {
                     
                     o.mesh.userData.wireframeMeshList = [];
                     o.mesh.traverse(c => {
+                        if (c.userData && c.userData.isWireframeOverlay) return; // Prevent infinite nesting
                         if (c.isMesh && c.userData.originalMaterial) {
                             const wm = new this.THREE.Mesh(c.geometry, wireMat);
                             wm.userData.isWireframeOverlay = true;
@@ -1547,36 +1608,32 @@ class BlockoutViewport {
                     });
                 }
 
+                // 3. Toggle wireframe visibility
                 if (o.mesh.userData.wireframeMeshList) {
                     o.mesh.userData.wireframeMeshList.forEach(wm => wm.visible = this.showWireframe);
                 }
 
-                // 3. Apply Shaded or Depth materials
+                // 4. Apply Shaded or Depth materials strictly to the BASE meshes
                 o.mesh.traverse(c => {
-                    if (c.isMesh && c.userData.isWireframeOverlay) return;
+                    if (c.userData && c.userData.isWireframeOverlay) return; // Leave overlays alone
                     if (c.isMesh && c.userData.originalMaterial) {
                         if (this.isDepthMode) {
-                            if (!c.userData.depthMat) c.userData.depthMat = new this.THREE.MeshDepthMaterial();
+                            if (!c.userData.depthMat || !c.userData.depthMat.isMaterial) {
+                                c.userData.depthMat = new this.THREE.MeshDepthMaterial();
+                            }
                             c.material = c.userData.depthMat;
+                        } else if (this.displayMode === 'shaded') {
+                            if (!c.userData.clayMat || !c.userData.clayMat.isMaterial) {
+                                c.userData.clayMat = new this.THREE.MeshStandardMaterial({ color: 0xaaaaaa, roughness: 0.8, metalness: 0.1 });
+                            }
+                            c.material = c.userData.clayMat;
                         } else {
                             c.material = c.userData.originalMaterial;
                             if (c.material) {
-                                c.material.wireframe = false;
-                                
-                                if (this.displayMode === 'shaded') {
-                                    if (c.material.map && !c.userData.originalMap) {
-                                        c.userData.originalMap = c.material.map;
-                                    }
-                                    if (c.material.map) {
-                                        c.material.map = null;
-                                        c.material.needsUpdate = true;
-                                    }
-                                } else if (this.displayMode === 'textured') {
-                                    if (c.userData.originalMap && !c.material.map) {
-                                        c.material.map = c.userData.originalMap;
-                                        c.material.needsUpdate = true;
-                                    }
-                                }
+                                const mats = Array.isArray(c.material) ? c.material : [c.material];
+                                mats.forEach((mat) => {
+                                    if (mat && mat.wireframe !== undefined) mat.wireframe = false;
+                                });
                             }
                         }
                     }
@@ -1645,6 +1702,167 @@ class BlockoutViewport {
     }
 
     // =========================================================================
+    // BAKE (SEND TO GRAPH)
+    // =========================================================================
+
+    async performBake(btnEl) {
+        if (!this.node || !this.renderer) return;
+        const originalText = btnEl.innerText;
+        btnEl.innerText = "BAKING...";
+
+        // 1. Get Target Resolution
+        let targetW = 512, targetH = 512;
+        const ww = this.node.widgets?.find(w => w.name === "width");
+        const wh = this.node.widgets?.find(w => w.name === "height");
+        if (ww) targetW = ww.value;
+        if (wh) targetH = wh.value;
+
+        // 2. Save Current State
+        const vpDiv = this.renderer.domElement.parentElement;
+        const origW = vpDiv.clientWidth;
+        const origH = vpDiv.clientHeight;
+        const origAspect = this.camera.aspect;
+        const origDisplayMode = this.displayMode;
+        const origWireframe = this.showWireframe;
+        const origDepth = this.isDepthMode;
+
+        // Hide Helpers and Wireframes
+        const helpers = [];
+        this.scene.traverse(c => {
+            if (
+                c.userData.isHelper || 
+                c.userData.isWireframeOverlay ||
+                c.type === 'GridHelper' || 
+                c.type === 'AxesHelper' || 
+                c.type === 'TransformControls' || 
+                c.type.includes('Helper') || 
+                c.isLine ||
+                c.isSprite
+            ) {
+                if (c.visible) {
+                    helpers.push(c);
+                    c.visible = false;
+                }
+            }
+        });
+        
+        // Explicitly hide transform controls and its invisible planes
+        if (this.transformControls.visible) {
+            helpers.push(this.transformControls);
+            this.transformControls.visible = false;
+        }
+
+        // Hide Floor and fixed camera representations
+        const fixed = this.sceneObjects.filter(o => o.isFixed || o.type === 'camera');
+        fixed.forEach(o => { if (o.mesh && o.mesh.visible) { helpers.push(o.mesh); o.mesh.visible = false; }});
+        if (this.floor && this.floor.visible) { helpers.push(this.floor); this.floor.visible = false; }
+
+        // Detach gizmo to ensure it doesn't render
+        let attachedObject = this.transformControls.object;
+        if (attachedObject) this.transformControls.detach();
+
+        // Hide Light Gizmos (materials only, so they still emit light)
+        const lights = this.sceneObjects.filter(o => ['pointlight', 'directionallight', 'spotlight'].includes(o.type));
+        lights.forEach(l => {
+            if (l.mesh && l.mesh.material) {
+                l.mesh.material.visible = false;
+            }
+        });
+
+
+        // 3. Setup Capture Canvas
+        this.renderer.setSize(targetW, targetH, false);
+        this.camera.aspect = targetW / targetH;
+        this.camera.updateProjectionMatrix();
+
+        // Ensure rendering finishes before capture
+        const captureFrame = async () => {
+            return new Promise(resolve => {
+                requestAnimationFrame(() => {
+                    this.renderer.render(this.scene, this.camera);
+                    resolve(this.renderer.domElement.toDataURL("image/jpeg", 0.92));
+                });
+            });
+        };
+
+        const origOverride = this.scene.overrideMaterial;
+
+        // SHADED PASS
+        this.displayMode = "shaded";
+        this.showWireframe = false;
+        this.isDepthMode = false;
+        
+        // Hide custom lights so shaded pass is lit neutrally
+        const activeLights = [];
+        lights.forEach(l => {
+            const actualLight = l.mesh.isLight ? l.mesh : l.mesh.children.find(c => c.isLight);
+            if (actualLight && actualLight.visible) {
+                activeLights.push(actualLight);
+                actualLight.visible = false;
+            }
+        });
+
+        this.updateDisplayMode();
+        const shaded64 = await captureFrame();
+        
+        // Restore custom lights for textured pass
+        activeLights.forEach(l => l.visible = true);
+
+        // TEXTURE PASS
+        this.displayMode = "textured";
+        this.updateDisplayMode();
+        const textured64 = await captureFrame();
+
+        // DEPTH PASS
+        this.isDepthMode = true;
+        this.updateDisplayMode();
+        const depth64 = await captureFrame();
+
+        // NORMAL PASS
+        this.isDepthMode = false;
+        this.updateDisplayMode();
+        const normalMat = new this.THREE.MeshNormalMaterial();
+        this.scene.overrideMaterial = normalMat;
+        const normal64 = await captureFrame();
+        this.scene.overrideMaterial = origOverride;
+
+        // 4. Restore State
+        this.displayMode = origDisplayMode;
+        this.showWireframe = origWireframe;
+        this.isDepthMode = origDepth;
+        this.updateDisplayMode();
+        
+        helpers.forEach(c => { c.visible = true; });
+        lights.forEach(l => {
+            if (l.mesh && l.mesh.material) {
+                l.mesh.material.visible = true;
+            }
+        });
+        if (attachedObject) this.transformControls.attach(attachedObject);
+
+        this.renderer.setSize(origW, origH, false);
+        this.camera.aspect = origAspect;
+        this.camera.updateProjectionMatrix();
+
+        // 5. Send to Node
+        const payload = {
+            shaded: shaded64,
+            textured: textured64,
+            depth: depth64,
+            normal: normal64
+        };
+
+        const wData = this.node.widgets?.find(w => w.name === "client_data");
+        if (wData) {
+            wData.value = JSON.stringify(payload);
+        }
+
+        // 6. Queue Prompt
+        btnEl.innerText = originalText;
+        app.queuePrompt(0);
+    }
+
+    // =========================================================================
     // RESIZE (unchanged)
     // =========================================================================
 
@@ -1656,7 +1874,48 @@ class BlockoutViewport {
             this.renderer.setSize(w, h, false);
             this.camera.aspect = w / h;
             this.camera.updateProjectionMatrix();
+            this.updateResolutionGate();
         }
+    }
+
+    updateResolutionGate() {
+        if (!this.gate) return;
+        if (!this.showResolutionGate) {
+            this.gate.style.display = "none";
+            return;
+        }
+
+        // Get node width/height from widgets
+        let targetW = 512;
+        let targetH = 512;
+        if (this.node && this.node.widgets) {
+            const ww = this.node.widgets.find(w => w.name === "width");
+            const wh = this.node.widgets.find(w => w.name === "height");
+            if (ww) targetW = ww.value;
+            if (wh) targetH = wh.value;
+        }
+
+        const vpDiv = this.renderer.domElement.parentElement;
+        const vw = vpDiv.clientWidth;
+        const vh = vpDiv.clientHeight;
+
+        const targetAspect = targetW / targetH;
+        const viewAspect = vw / vh;
+
+        let gw, gh;
+        if (targetAspect > viewAspect) {
+            // Target is wider than viewport -> fit width
+            gw = vw - 40; 
+            gh = gw / targetAspect;
+        } else {
+            // Target is taller than viewport -> fit height
+            gh = vh - 40; 
+            gw = gh * targetAspect;
+        }
+
+        this.gate.style.width = `${gw}px`;
+        this.gate.style.height = `${gh}px`;
+        this.gate.style.display = "block";
     }
 
     // =========================================================================
@@ -2099,10 +2358,35 @@ class BlockoutViewport {
         
         this.sceneObjects.forEach(obj => {
             if (!obj.visible) return;
-            if (obj.isFixed) return; // skip camera
-            if (obj.type === 'pointlight' || obj.type === 'directionallight' || obj.type === 'spotlight') return; // skip helpers/lights
+            if (obj.isFixed) return; 
+            if (obj.type === 'pointlight' || obj.type === 'directionallight' || obj.type === 'spotlight') return; 
             
             const clone = obj.mesh.clone();
+
+                    // Strip out wireframe overlays safely for all THREE.js versions
+                    const overlays = [];
+                    clone.traverse(c => {
+                        if (c.userData && c.userData.isWireframeOverlay) overlays.push(c);
+                    });
+                    overlays.forEach(c => {
+                        if (c.parent) c.parent.remove(c);
+                    });
+            
+
+            clone.traverse(c => {
+                if (c.userData) {
+                    const safe = {};
+                    for (let key in c.userData) {
+                        const val = c.userData[key];
+                        if (val && val.isMaterial) continue; 
+                        if (val && Array.isArray(val) && val[0] && val[0].isMaterial) continue;
+                        if (key === 'wireframeMeshList') continue;
+                        safe[key] = val;
+                    }
+                    c.userData = safe;
+                }
+            });
+
             exportScene.add(clone);
         });
 
@@ -2155,23 +2439,90 @@ class BlockoutViewport {
                 const name = modal.querySelector("#scene-name").value.trim();
                 if (!name) return false;
 
+                const origDisplayMode = this.displayMode;
+                const origWireframe = this.showWireframe;
+                const origDepth = this.isDepthMode;
+
+                this.displayMode = 'textured';
+                this.showWireframe = false;
+                this.isDepthMode = false;
+                this.updateDisplayMode();
+
                 const exportScene = new this.THREE.Scene();
                 this.sceneObjects.forEach(obj => {
                     if (!obj.visible || obj.isFixed) return;
-                    if (obj.type === 'pointlight' || obj.type === 'directionallight' || obj.type === 'spotlight') return; // Lights don't export well yet
+                    if (obj.type === 'pointlight' || obj.type === 'directionallight' || obj.type === 'spotlight') return; 
                     const clone = obj.mesh.clone();
+                    
+                    // Strip out wireframe overlays safely for all THREE.js versions
+                    const overlays = [];
+                    clone.traverse(c => {
+                        if (c.userData && c.userData.isWireframeOverlay) overlays.push(c);
+                    });
+                    overlays.forEach(c => {
+                        if (c.parent) c.parent.remove(c);
+                    });
+                    
+
+                    clone.traverse(c => {
+                        if (c.userData) {
+                            const safe = {};
+                            for (let key in c.userData) {
+                                const val = c.userData[key];
+                                if (val && val.isMaterial) continue; 
+                                if (val && Array.isArray(val) && val[0] && val[0].isMaterial) continue;
+                                if (key === 'wireframeMeshList') continue;
+                                safe[key] = val;
+                            }
+                            c.userData = safe;
+                        }
+                    });
+
                     clone.userData.blockoutType = obj.type;
                     clone.userData.blockoutName = obj.name;
+
                     exportScene.add(clone);
                 });
-
+                
                 const exporter = new this.GLTFExporter();
                 exporter.parse(
                     exportScene,
                     async (gltf) => {
-                        gltf.scenes[0].extras = {
+                        this.displayMode = origDisplayMode;
+                        this.showWireframe = origWireframe;
+                        this.isDepthMode = origDepth;
+                        this.updateDisplayMode();
+
+                        const lightData = [];
+                        this.sceneObjects.forEach(obj => {
+                            if (obj.visible && !obj.isFixed && ['pointlight', 'directionallight', 'spotlight'].includes(obj.type)) {
+                                const actualLight = obj.mesh.isLight ? obj.mesh : obj.mesh.children.find(c => c.isLight);
+                                if (actualLight) {
+                                    lightData.push({
+                                        type: obj.type,
+                                        name: obj.name,
+                                        color: actualLight.color.getHex(),
+                                        intensity: actualLight.intensity,
+                                        position: obj.mesh.position.toArray(),
+                                        distance: actualLight.distance,
+                                        angle: actualLight.angle,
+                                        penumbra: actualLight.penumbra,
+                                        decay: actualLight.decay
+                                    });
+                                }
+                            }
+                        });
+
+                        gltf.asset = gltf.asset || {};
+                        gltf.asset.extras = {
                             cameraPos: this.camera.position.toArray(),
-                            cameraTarget: this.controls.target.toArray()
+                            cameraTarget: this.controls.target.toArray(),
+                            lights: lightData,
+                            isDepthMode: this.isDepthMode, 
+                            depthNear: this.depthNear,
+                            depthFar: this.depthFar,
+                            displayMode: this.displayMode,
+                            showWireframe: this.showWireframe
                         };
 
                         const res = await fetch("/yedp/save_scene", {
@@ -2186,8 +2537,14 @@ class BlockoutViewport {
                             alert("Error saving scene: " + resData.message);
                         }
                     },
-                    (err) => console.error(err),
-                    { binary: false } // Export JSON
+                    (err) => {
+                        this.displayMode = origDisplayMode;
+                        this.showWireframe = origWireframe;
+                        this.isDepthMode = origDepth;
+                        this.updateDisplayMode();
+                        console.error(err);
+                    },
+                    { binary: false } 
                 );
             }
         );
@@ -2214,6 +2571,9 @@ class BlockoutViewport {
                 
                 const loader = new this.GLTFLoader();
                 loader.load(url, (gltf) => {
+                    // Detach gizmo safely BEFORE mass deletion
+                    this.selectObjectById(null);
+
                     // Clear existing non-fixed
                     const toDelete = this.sceneObjects.filter(o => !o.isFixed).map(o => o.id);
                     toDelete.forEach(id => this.deleteObject(id));
@@ -2225,15 +2585,64 @@ class BlockoutViewport {
                         child.userData.isSceneLoad = true;
                         const type = child.userData.blockoutType || "imported";
                         const bname = child.userData.blockoutName || child.name || "Loaded_Obj";
-                        this.addObject(type, child, bname);
+                        this.addObject(type, child, bname, false); // AutoSelect false!
                     });
 
-                    if (gltf.scenes && gltf.scenes[0] && gltf.scenes[0].extras) {
-                        const ex = gltf.scenes[0].extras;
+                    // Safely extract custom payload catching all THREE.js edge cases
+                    let ex = null;
+                    if (gltf.parser && gltf.parser.json && gltf.parser.json.asset && gltf.parser.json.asset.extras) {
+                        ex = gltf.parser.json.asset.extras;
+                    } else if (gltf.asset && gltf.asset.extras) {
+                        ex = gltf.asset.extras;
+                    } else if (gltf.scenes && gltf.scenes[0] && gltf.scenes[0].userData) {
+                        ex = gltf.scenes[0].userData;
+                    } else if (gltf.scene && gltf.scene.userData) {
+                        ex = gltf.scene.userData;
+                    } else if (gltf.scenes && gltf.scenes[0] && gltf.scenes[0].extras) {
+                        ex = gltf.scenes[0].extras; // Legacy fallback
+                    }
+
+                    if (ex) {
                         if (ex.cameraPos) this.camera.position.fromArray(ex.cameraPos);
                         if (ex.cameraTarget) this.controls.target.fromArray(ex.cameraTarget);
                         this.controls.update();
+
+                        if (ex.lights && Array.isArray(ex.lights)) {
+                            ex.lights.forEach(l => {
+                                const entry = this.addObject(l.type, null, null, false);
+                                if (!entry) return;
+                                if (l.name) entry.name = l.name;
+                                entry.mesh.position.fromArray(l.position);
+                                const actualLight = entry.mesh.children.find(c => c.isLight);
+                                if (actualLight) {
+                                    actualLight.color.setHex(l.color);
+                                    actualLight.intensity = l.intensity;
+                                    if (l.distance !== undefined) actualLight.distance = l.distance;
+                                    if (l.angle !== undefined) actualLight.angle = l.angle;
+                                    if (l.penumbra !== undefined) actualLight.penumbra = l.penumbra;
+                                    if (l.decay !== undefined) actualLight.decay = l.decay;
+                                }
+                            });
+                        }
+
+                        if (ex.isDepthMode !== undefined) this.isDepthMode = ex.isDepthMode;
+                        if (ex.depthNear !== undefined) this.depthNear = ex.depthNear;
+                        if (ex.depthFar !== undefined) this.depthFar = ex.depthFar;
+                        if (ex.displayMode !== undefined) this.displayMode = ex.displayMode;
+                        if (ex.showWireframe !== undefined) this.showWireframe = ex.showWireframe;
+
+                        if (this.propInputs.depthCheck) this.propInputs.depthCheck.checked = this.isDepthMode;
+                        if (this.propInputs.depthNear) this.propInputs.depthNear.value = this.depthNear;
+                        if (this.propInputs.depthFar) this.propInputs.depthFar.value = this.depthFar;
                     }
+
+                    setTimeout(() => {
+                        if (this.updateToolbarUI) {
+                            this.updateToolbarUI();
+                        } else {
+                            this.updateDisplayMode();
+                        }
+                    }, 50);
                 });
             }
         );
@@ -2288,6 +2697,19 @@ app.registerExtension({
                         if (w.name === "info") {
                             w.computeSize = () => [0, -4];
                             if (w.element) w.element.style.display = "none";
+                        }
+                        if (w.name === "client_data") {
+                            w.computeSize = () => [0, -4];
+                            if (w.element) w.element.style.display = "none";
+                        }
+                        if (w.name === "width" || w.name === "height") {
+                            const origCallback = w.callback;
+                            w.callback = function (val) {
+                                if (origCallback) origCallback.call(this, val);
+                                if (this.blockoutVp) {
+                                    this.blockoutVp.updateResolutionGate();
+                                }
+                            }.bind(this);
                         }
                     }
                 }
