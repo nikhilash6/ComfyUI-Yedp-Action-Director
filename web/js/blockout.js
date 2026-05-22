@@ -1674,23 +1674,13 @@ class BlockoutViewport {
 
         const origOverride = this.scene.overrideMaterial;
 
+        // SHADED PASS
         this.displayMode = "shaded";
         this.showWireframe = false;
         this.isDepthMode = false;
-        
-        const activeLights = [];
-        lights.forEach(l => {
-            const actualLight = l.mesh.isLight ? l.mesh : l.mesh.children.find(c => c.isLight);
-            if (actualLight && actualLight.visible) {
-                activeLights.push(actualLight);
-                actualLight.visible = false;
-            }
-        });
 
         this.updateDisplayMode();
         const shaded64 = await captureFrame();
-        
-        activeLights.forEach(l => l.visible = true);
 
         this.displayMode = "textured";
         this.updateDisplayMode();
