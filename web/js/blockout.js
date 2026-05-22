@@ -3,10 +3,6 @@ import { app } from "/scripts/app.js";
 /**
  * YEDP BLOCKOUT — 3D Blockout Viewport with Object Management
  * Reuses THREE.js, OrbitControls, and TransformControls from Action Director's shared libs.
- *
- * Object management data structure:
- * sceneObjects = [{ id, name, type, mesh, visible }]
- * selectedObjectId = number | null
  */
 
 const loadThreeJS = async () => {
@@ -47,7 +43,6 @@ const loadThreeJS = async () => {
             
             const ptLib = await import(new URL("./three-gpu-pathtracer.module.js?t=" + Date.now(), baseUrl).href);
 
-            // Our specific exporter
             const { GLTFExporter } = await import(new URL("./GLTFExporter.js", baseUrl).href);
 
             console.log("[Yedp Blockout] Engine loaded successfully.");
@@ -60,7 +55,6 @@ const loadThreeJS = async () => {
     });
 };
 
-// --- BLOCKOUT VIEWPORT CLASS ---
 class BlockoutViewport {
     constructor(node, container) {
         this.node = node;
@@ -74,29 +68,25 @@ class BlockoutViewport {
         this.clock = null;
         this.floor = null;
 
-        // --- OBJECT MANAGEMENT STATE ---
-        this.sceneObjects = [];      // [{ id, name, type, mesh, visible }]
+        this.sceneObjects = [];
         this.objectIdCounter = 0;
         this.selectedObjectId = null;
+        
+        this.availableAssets = { vehicle: [], furniture: [], props: [], plants: [] };
 
         this.gizmoBtns = {};
         this.isHovered = false;
         this.resizeObserver = null;
-        this.outlinerListEl = null;     // Outliner list DOM element
+        this.outlinerListEl = null;
 
-        // Snapping
         this.snapToGrid = false;
         this.snapUnit = 0.5;
-        this.snapRotation = 15; // degrees
+        this.snapRotation = 15;
 
-        // Transform space & pivot
-        this.transformSpace = 'world'; // 'world' or 'local'
-
-        // Size Reference
+        this.transformSpace = 'world';
         this.sizeRefVisible = false;
         this.sizeRefSprite = null;
 
-        // Properties panel inputs
         this.propInputs = {
             px: null, py: null, pz: null,
             rx: null, ry: null, rz: null,
@@ -112,6 +102,17 @@ class BlockoutViewport {
         this.init();
     }
 
+    async fetchBlockoutAssets() {
+        try {
+            const res = await fetch("/yedp/get_blockout_assets");
+            const data = await res.json();
+            this.availableAssets = data.assets || {};
+        } catch (e) {
+            console.error("[Yedp Blockout] Failed to fetch custom assets:", e);
+            this.availableAssets = { vehicle: [], furniture: [], props: [], plants: [] };
+        }
+    }
+
     async init() {
         try {
             const libs = await loadThreeJS();
@@ -119,6 +120,8 @@ class BlockoutViewport {
             this.GLTFLoader = libs.GLTFLoader;
             this.FBXLoader = libs.FBXLoader;
             this.GLTFExporter = libs.GLTFExporter || libs.GLTFExporter?.GLTFExporter || libs.GLTFExporter?.default?.GLTFExporter;
+
+            await this.fetchBlockoutAssets();
 
             // --- DOM LAYOUT ---
             this.container.innerHTML = "";
@@ -150,7 +153,6 @@ class BlockoutViewport {
             });
             centerColDiv.appendChild(viewportDiv);
 
-            // Resolution Gate Overlay
             this.gate = document.createElement("div");
             this.gate.className = "yedp-resolution-gate";
             Object.assign(this.gate.style, {
@@ -166,7 +168,7 @@ class BlockoutViewport {
             const bottomPanelDiv = document.createElement("div");
             bottomPanelDiv.className = "blockout-creation-panel";
             Object.assign(bottomPanelDiv.style, {
-                height: "140px", flex: "0 0 140px", background: "#1a1a1a",
+                height: "320px", flex: "0 0 300px", background: "#1a1a1a",
                 borderTop: "1px solid #333", display: "flex", flexDirection: "column",
                 zIndex: "10"
             });
@@ -186,13 +188,11 @@ class BlockoutViewport {
             this.scene = new this.THREE.Scene();
             this.scene.background = new this.THREE.Color(0x1a1a1a);
 
-            // Grid + Axes
             const grid = new this.THREE.GridHelper(10, 10, 0x444444, 0x222222);
             this.scene.add(grid);
             const axes = new this.THREE.AxesHelper(1);
             this.scene.add(axes);
 
-            // Shadow floor
             const floorGeo = new this.THREE.PlaneGeometry(50, 50);
             const floorMat = new this.THREE.ShadowMaterial({ opacity: 0.4 });
             this.floor = new this.THREE.Mesh(floorGeo, floorMat);
@@ -200,10 +200,8 @@ class BlockoutViewport {
             this.floor.receiveShadow = true;
             this.scene.add(this.floor);
 
-            // Size Reference Helper (1.68m human silhouette)
             this.buildSizeReference();
 
-            // Cameras
             this.perspCam = new this.THREE.PerspectiveCamera(45, 1, 0.01, 2000);
             this.perspCam.position.set(3, 2.5, 4);
 
@@ -214,7 +212,6 @@ class BlockoutViewport {
             this.camera = this.perspCam;
             this.isOrthographic = false;
 
-            // Add Camera to object manager
             this.sceneObjects.push({
                 id: 'camera',
                 name: 'Camera',
@@ -224,7 +221,6 @@ class BlockoutViewport {
                 isFixed: true
             });
 
-            // Renderer
             this.renderer = new this.THREE.WebGLRenderer({ antialias: true, alpha: false });
             if (this.renderer.outputColorSpace) this.renderer.outputColorSpace = this.THREE.SRGBColorSpace;
             else this.renderer.outputEncoding = this.THREE.sRGBEncoding;
@@ -233,14 +229,12 @@ class BlockoutViewport {
             viewportDiv.appendChild(this.renderer.domElement);
             Object.assign(this.renderer.domElement.style, { width: "100%", height: "100%", display: "block" });
 
-            // Orbit Controls
             this.controls = new libs.OrbitControls(this.camera, this.renderer.domElement);
             this.controls.target.set(0, 0.5, 0);
             this.controls.enableDamping = true;
             this.controls.dampingFactor = 0.1;
             this.controls.addEventListener('change', () => this.syncPropertiesPanel());
 
-            // Transform Controls (Gizmo)
             this.transformControls = new libs.TransformControls(this.camera, this.renderer.domElement);
             this.transformControls.addEventListener('dragging-changed', (event) => {
                 this.controls.enabled = !event.value;
@@ -250,7 +244,6 @@ class BlockoutViewport {
             });
             this.scene.add(this.transformControls);
 
-            // --- LIGHTS ---
             const ambient = new this.THREE.AmbientLight(0xffffff, 0.6);
             this.scene.add(ambient);
 
@@ -266,10 +259,8 @@ class BlockoutViewport {
             dirLight.shadow.camera.bottom = -5;
             this.scene.add(dirLight);
 
-            // --- DEFAULT CUBE (via object manager) ---
             this.addObject("cube");
 
-            // --- CLICK TO SELECT ---
             this.raycaster = new this.THREE.Raycaster();
             this.mouse = new this.THREE.Vector2();
             this.pointerDownPos = new this.THREE.Vector2();
@@ -283,7 +274,7 @@ class BlockoutViewport {
                 if (this.transformControls.dragging || this.transformControls.axis) return;
 
                 const dist = Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y);
-                if (dist > 5) return; // It was a drag, not a click
+                if (dist > 5) return; 
 
                 const rect = viewportDiv.getBoundingClientRect();
                 this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -291,13 +282,11 @@ class BlockoutViewport {
 
                 this.raycaster.setFromCamera(this.mouse, this.camera);
 
-                // Only raycast against managed scene objects
                 const meshes = this.sceneObjects.filter(o => o.visible).map(o => o.mesh);
                 const intersects = this.raycaster.intersectObjects(meshes, true);
                 const hit = intersects.find(i => i.object.isMesh);
 
                 if (hit) {
-                    // Resolve hit mesh → scene object (could be a child mesh)
                     const sceneObj = this.findSceneObjectByMesh(hit.object);
                     if (sceneObj) {
                         this.selectObjectById(sceneObj.id);
@@ -307,7 +296,6 @@ class BlockoutViewport {
                 }
             });
 
-            // --- UI ---
             this.buildGizmoPanel(viewportDiv);
             this.buildViewportToolbar(viewportDiv);
             this.buildOutliner(sidebarDiv);
@@ -315,11 +303,9 @@ class BlockoutViewport {
             this.buildCreationPanel(bottomPanelDiv);
             this.buildSnapControls(viewportDiv);
 
-            // --- RESIZE ---
             this.resizeObserver = new ResizeObserver(() => this.onResize(viewportDiv));
             this.resizeObserver.observe(viewportDiv);
 
-            // --- START ---
             this.animate();
             console.log("[Yedp Blockout] Viewport initialized successfully.");
 
@@ -333,12 +319,24 @@ class BlockoutViewport {
     // OBJECT MANAGEMENT
     // =========================================================================
 
-    /**
-     * Add a new object to the scene.
-     * @param {string} type - Object type (currently only "cube")
-     * @param {boolean} autoSelect - Fix for TransformControls attachment thrashing during load
-     * @returns {object} The created scene object entry
-     */
+    loadCategoryAsset(category, filename) {
+        const baseUrl = new URL(".", import.meta.url).href;
+        const url = new URL(`../blockout/${category}/${filename}`, baseUrl).href;
+        
+        const ext = filename.split('.').pop().toLowerCase();
+        if (ext === 'fbx') {
+            const loader = new this.FBXLoader();
+            loader.load(url, (fbx) => {
+                this.addObject("imported", fbx, filename);
+            });
+        } else {
+            const loader = new this.GLTFLoader();
+            loader.load(url, (gltf) => {
+                this.addObject("imported", gltf.scene, filename);
+            });
+        }
+    }
+
     addObject(type = "cube", importedMesh = null, importedName = null, autoSelect = true) {
         this.objectIdCounter++;
         const id = this.objectIdCounter;
@@ -347,7 +345,6 @@ class BlockoutViewport {
         if (importedMesh) {
             mesh = importedMesh;
             
-            // --- NEW FIX: Purge any corrupt wireframes baked into old save files ---
             const lingeringOverlays = [];
             mesh.traverse(c => {
                 if (c.userData && c.userData.isWireframeOverlay) lingeringOverlays.push(c);
@@ -487,10 +484,6 @@ class BlockoutViewport {
         return entry;
     }
 
-    /**
-     * Delete an object by ID.
-     * @param {number} id
-     */
     deleteObject(id) {
         const idx = this.sceneObjects.findIndex(o => o.id === id);
         if (idx === -1) return;
@@ -498,12 +491,10 @@ class BlockoutViewport {
         const entry = this.sceneObjects[idx];
         if (entry.isFixed) return;
 
-        // Detach gizmo if this object is selected
         if (this.selectedObjectId === id) {
             this.selectObjectById(null);
         }
 
-        // Remove from THREE scene
         this.scene.remove(entry.mesh);
         if (entry.mesh.geometry) entry.mesh.geometry.dispose();
         if (entry.mesh.material) {
@@ -511,34 +502,19 @@ class BlockoutViewport {
             else entry.mesh.material.dispose();
         }
 
-        // Remove from array
         this.sceneObjects.splice(idx, 1);
-
         this.refreshOutliner();
-        console.log(`[Yedp Blockout] Deleted object: ${entry.name} (id=${id})`);
     }
 
-    /**
-     * Rename an object by ID.
-     * @param {number} id
-     * @param {string} newName
-     */
     renameObject(id, newName) {
         const entry = this.sceneObjects.find(o => o.id === id);
         if (!entry) return;
 
-        const oldName = entry.name;
-        entry.name = newName || oldName;
+        entry.name = newName || entry.name;
         entry.mesh.name = entry.name;
-
         this.refreshOutliner();
-        console.log(`[Yedp Blockout] Renamed: "${oldName}" → "${entry.name}"`);
     }
 
-    /**
-     * Select an object by its ID (or null to deselect).
-     * @param {number|null} id
-     */
     selectObjectById(id) {
         this.selectedObjectId = id;
 
@@ -558,10 +534,6 @@ class BlockoutViewport {
         this.syncPropertiesPanel();
     }
 
-    /**
-     * Toggle visibility of an object by ID.
-     * @param {number} id
-     */
     toggleObjectVisibility(id) {
         const entry = this.sceneObjects.find(o => o.id === id);
         if (!entry) return;
@@ -569,7 +541,6 @@ class BlockoutViewport {
         entry.visible = !entry.visible;
         entry.mesh.visible = entry.visible;
 
-        // If hiding the selected object, detach gizmo
         if (!entry.visible && this.selectedObjectId === id) {
             this.selectObjectById(null);
         }
@@ -577,18 +548,11 @@ class BlockoutViewport {
         this.refreshOutliner();
     }
 
-    /**
-     * Get the currently selected scene object entry (or null).
-     */
     getSelectedObject() {
         if (this.selectedObjectId === null) return null;
         return this.sceneObjects.find(o => o.id === this.selectedObjectId) || null;
     }
 
-    /**
-     * Find the scene object that owns a given THREE.Mesh (checks userData.blockoutId).
-     * Walks up the parent chain for nested meshes.
-     */
     findSceneObjectByMesh(mesh) {
         let current = mesh;
         while (current) {
@@ -600,24 +564,11 @@ class BlockoutViewport {
         return null;
     }
 
-    /**
-     * Generate a random muted color for new objects.
-     */
-    _randomColor() {
-        const hue = Math.random();
-        const sat = 0.5 + Math.random() * 0.3;
-        const light = 0.4 + Math.random() * 0.2;
-        const color = new this.THREE.Color();
-        color.setHSL(hue, sat, light);
-        return color;
-    }
-
     // =========================================================================
     // OUTLINER PANEL (LEFT SIDEBAR)
     // =========================================================================
 
     buildOutliner(sidebarDiv) {
-        // Outliner Header
         const header = document.createElement("div");
         Object.assign(header.style, {
             padding: "8px 12px", background: "#222", borderBottom: "1px solid #333",
@@ -627,7 +578,6 @@ class BlockoutViewport {
         header.innerText = "Outliner";
         sidebarDiv.appendChild(header);
 
-        // Object List Container
         this.outlinerListEl = document.createElement("div");
         Object.assign(this.outlinerListEl.style, {
             flex: "1 1 0", overflowY: "auto", display: "flex", flexDirection: "column",
@@ -685,7 +635,6 @@ class BlockoutViewport {
                     marginLeft: "8px"
                 });
 
-                // Name container
                 const nameEl = document.createElement("div");
                 nameEl.innerText = obj.name;
                 nameEl.title = `Double-click to rename`;
@@ -695,12 +644,10 @@ class BlockoutViewport {
                 });
                 row.appendChild(nameEl);
 
-                // Actions container
                 const actions = document.createElement("div");
                 Object.assign(actions.style, { display: "flex", gap: "6px" });
 
                 if (!obj.isFixed) {
-                    // Visibility toggle
                     const btnVis = document.createElement("button");
                     btnVis.innerText = obj.visible ? "👁" : "○";
                     btnVis.title = "Toggle Visibility";
@@ -716,7 +663,6 @@ class BlockoutViewport {
                     };
                     actions.appendChild(btnVis);
 
-                    // Delete button
                     const btnDel = document.createElement("button");
                     btnDel.innerText = "✕";
                     btnDel.title = "Delete";
@@ -734,16 +680,10 @@ class BlockoutViewport {
                 }
 
                 row.appendChild(actions);
-
-                row.onclick = () => {
-                    this.selectObjectById(obj.id);
-                };
-
+                row.onclick = () => { this.selectObjectById(obj.id); };
                 row.ondblclick = (e) => {
                     e.stopPropagation();
-                    if (!obj.isFixed) {
-                        this.promptRenameObject(obj.id);
-                    }
+                    if (!obj.isFixed) { this.promptRenameObject(obj.id); }
                 };
 
                 if (!isSelected) {
@@ -769,7 +709,6 @@ class BlockoutViewport {
     // =========================================================================
 
     buildPropertiesPanel(panelDiv) {
-        // Header
         const header = document.createElement("div");
         Object.assign(header.style, {
             padding: "8px 12px", background: "#222", borderBottom: "1px solid #333",
@@ -779,7 +718,6 @@ class BlockoutViewport {
         header.innerText = "Properties";
         panelDiv.appendChild(header);
 
-        // Content Container
         this.propsContentEl = document.createElement("div");
         Object.assign(this.propsContentEl.style, {
             flex: "1 1 0", overflowY: "auto", display: "flex", flexDirection: "column",
@@ -787,7 +725,6 @@ class BlockoutViewport {
         });
         panelDiv.appendChild(this.propsContentEl);
 
-        // Empty state message
         this.propsEmptyMsg = document.createElement("div");
         Object.assign(this.propsEmptyMsg.style, {
             color: "#555", fontStyle: "italic", textAlign: "center", marginTop: "20px"
@@ -795,18 +732,15 @@ class BlockoutViewport {
         this.propsEmptyMsg.innerText = "No object selected";
         this.propsContentEl.appendChild(this.propsEmptyMsg);
 
-        // Properties form (hidden by default)
         this.propsForm = document.createElement("div");
         Object.assign(this.propsForm.style, {
             display: "none", flexDirection: "column", gap: "12px"
         });
         this.propsContentEl.appendChild(this.propsForm);
 
-        // === Transform Space & Pivot Controls ===
         const spaceSection = document.createElement("div");
         Object.assign(spaceSection.style, { display: "flex", gap: "8px", flexWrap: "wrap" });
 
-        // Space toggle
         const spaceWrap = document.createElement("div");
         Object.assign(spaceWrap.style, { flex: "1" });
         const spaceLbl = document.createElement("div");
@@ -841,7 +775,6 @@ class BlockoutViewport {
         spaceRow.append(btnWorld, btnLocal);
         spaceWrap.appendChild(spaceRow);
 
-        // Pivot toggle
         const pivotWrap = document.createElement("div");
         Object.assign(pivotWrap.style, { flex: "1" });
         const pivotLbl = document.createElement("div");
@@ -878,7 +811,6 @@ class BlockoutViewport {
         spaceSection.append(spaceWrap, pivotWrap);
         this.propsForm.appendChild(spaceSection);
 
-        // Create Vector3 Inputs
         const createVec3Input = (label, keyPrefix, step) => {
             const section = document.createElement("div");
             const lbl = document.createElement("div");
@@ -904,13 +836,10 @@ class BlockoutViewport {
                 Object.assign(inp.style, {
                     width: "100%", background: "transparent", border: "none", color: "#ccc",
                     padding: "4px 2px", fontSize: "11px", outline: "none", fontFamily: "inherit",
-                    minWidth: "0" // prevent flex overflow
+                    minWidth: "0" 
                 });
                 
-                // When user edits a value manually
                 inp.addEventListener('input', () => this.applyPropertiesFromUI());
-                
-                // Block keys from bubbling to ComfyUI (like delete/space)
                 inp.addEventListener('keydown', (e) => {
                     e.stopPropagation();
                     if (e.key === 'Enter') inp.blur();
@@ -1069,23 +998,19 @@ class BlockoutViewport {
 
         const m = obj.mesh;
         
-        // Position
         if (document.activeElement !== this.propInputs.px) this.propInputs.px.value = m.position.x.toFixed(3);
         if (document.activeElement !== this.propInputs.py) this.propInputs.py.value = m.position.y.toFixed(3);
         if (document.activeElement !== this.propInputs.pz) this.propInputs.pz.value = m.position.z.toFixed(3);
 
-        // Rotation (convert to degrees)
         const rad2deg = 180 / Math.PI;
         if (document.activeElement !== this.propInputs.rx) this.propInputs.rx.value = (m.rotation.x * rad2deg).toFixed(2);
         if (document.activeElement !== this.propInputs.ry) this.propInputs.ry.value = (m.rotation.y * rad2deg).toFixed(2);
         if (document.activeElement !== this.propInputs.rz) this.propInputs.rz.value = (m.rotation.z * rad2deg).toFixed(2);
 
-        // Scale
         if (document.activeElement !== this.propInputs.sx) this.propInputs.sx.value = m.scale.x.toFixed(3);
         if (document.activeElement !== this.propInputs.sy) this.propInputs.sy.value = m.scale.y.toFixed(3);
         if (document.activeElement !== this.propInputs.sz) this.propInputs.sz.value = m.scale.z.toFixed(3);
 
-        // FOV & Camera
         if (obj.type === 'camera') {
             this.propInputs.fovSection.style.display = 'block';
             this.propInputs.orthoSection.style.display = 'block';
@@ -1112,7 +1037,6 @@ class BlockoutViewport {
             this.propInputs.clipFarSection.style.display = 'none';
         }
 
-        // Color & Light properties
         const isMesh = ['cube', 'plane', 'sphere', 'cone', 'cylinder', 'pipe', 'torus', 'imported'].includes(obj.type);
         const isLight = ['pointlight', 'directionallight', 'spotlight'].includes(obj.type);
 
@@ -1197,23 +1121,19 @@ class BlockoutViewport {
 
         const m = obj.mesh;
 
-        // Position
         m.position.x = parseFloat(this.propInputs.px.value) || 0;
         m.position.y = parseFloat(this.propInputs.py.value) || 0;
         m.position.z = parseFloat(this.propInputs.pz.value) || 0;
 
-        // Rotation (convert from degrees to radians)
         const deg2rad = Math.PI / 180;
         m.rotation.x = (parseFloat(this.propInputs.rx.value) || 0) * deg2rad;
         m.rotation.y = (parseFloat(this.propInputs.ry.value) || 0) * deg2rad;
         m.rotation.z = (parseFloat(this.propInputs.rz.value) || 0) * deg2rad;
 
-        // Scale
         m.scale.x = parseFloat(this.propInputs.sx.value) || 1;
         m.scale.y = parseFloat(this.propInputs.sy.value) || 1;
         m.scale.z = parseFloat(this.propInputs.sz.value) || 1;
 
-        // FOV & Camera Config
         if (obj.type === 'camera') {
             const wantOrtho = this.propInputs.ortho.checked;
             if (wantOrtho !== this.isOrthographic) {
@@ -1251,7 +1171,6 @@ class BlockoutViewport {
             if (m !== activeCam) m.updateProjectionMatrix();
         }
 
-        // Color & Light properties
         const isMesh = ['cube', 'plane', 'sphere', 'cone', 'cylinder', 'pipe', 'torus', 'imported'].includes(obj.type);
         const isLight = ['pointlight', 'directionallight', 'spotlight'].includes(obj.type);
 
@@ -1286,16 +1205,14 @@ class BlockoutViewport {
             }
         }
 
-        // Notify TransformControls that the object changed manually
         if (this.transformControls.object === m) {
-            // Need to force update gizmo visually
             const mode = this.transformControls.getMode();
             this.transformControls.setMode(mode);
         }
     }
 
     // =========================================================================
-    // USER ACTIONS (bound to buttons + keyboard)
+    // USER ACTIONS
     // =========================================================================
 
     deleteSelectedObject() {
@@ -1321,14 +1238,13 @@ class BlockoutViewport {
     }
 
     // =========================================================================
-    // GIZMO PANEL (unchanged from original)
+    // GIZMO PANEL
     // =========================================================================
 
     buildGizmoPanel(vpDiv) {
         this.container.addEventListener('mouseenter', () => this.isHovered = true);
         this.container.addEventListener('mouseleave', () => this.isHovered = false);
 
-        // Viewport Camera System Panel
         const viewPanel = document.createElement("div");
         Object.assign(viewPanel.style, {
             position: "absolute", top: "10px", right: "10px", 
@@ -1364,7 +1280,6 @@ class BlockoutViewport {
         
         vpDiv.appendChild(viewPanel);
 
-        // Save/Load Panel
         const scenePanel = document.createElement("div");
         Object.assign(scenePanel.style, {
             position: "absolute", top: "10px", right: "130px", 
@@ -1404,7 +1319,6 @@ class BlockoutViewport {
         scenePanel.append(btnSave, btnLoad, btnBake);
         vpDiv.appendChild(scenePanel);
 
-        // Gizmo Toolbar
         const panel = document.createElement("div");
         Object.assign(panel.style, {
             position: "absolute", top: "10px", left: "10px", zIndex: "100",
@@ -1464,7 +1378,6 @@ class BlockoutViewport {
             alignItems: "center", gap: "10px", zIndex: "10"
         });
 
-        // 1. Display Mode
         this.displayMode = "shaded"; 
         this.showWireframe = false;
         
@@ -1520,21 +1433,18 @@ class BlockoutViewport {
         this.toolbarBtns.shaded = btnShaded;
         this.toolbarBtns.tex = btnTex;
 
-        // Resolution Gate Toggle
         const gateWrap = document.createElement("div");
         Object.assign(gateWrap.style, { display: "flex", alignItems: "center", borderLeft: "1px solid #555", paddingLeft: "10px" });
         const btnGate = createIconBtn(svgGate, "Resolution Gate", () => { this.showResolutionGate = !this.showResolutionGate; this.updateResolutionGate(); this.updateToolbarUI(); });
         gateWrap.appendChild(btnGate);
         this.toolbarBtns.gate = btnGate;
 
-        // Size Reference Toggle
         const sizeWrap = document.createElement("div");
         Object.assign(sizeWrap.style, { display: "flex", alignItems: "center", borderLeft: "1px solid #555", paddingLeft: "10px" });
         const btnPerson = createIconBtn(svgPerson, "Size Reference (1.68m)", () => { this.toggleSizeReference(); this.updateToolbarUI(); });
         sizeWrap.appendChild(btnPerson);
         this.toolbarBtns.person = btnPerson;
 
-        // 2. Depth Mode
         this.isDepthMode = false;
         this.depthNear = 0.1;
         this.depthFar = 10.0;
@@ -1583,13 +1493,11 @@ class BlockoutViewport {
     updateDisplayMode() {
         this.sceneObjects.forEach(o => {
             if (['cube', 'plane', 'sphere', 'cone', 'cylinder', 'pipe', 'torus', 'imported'].includes(o.type)) {
-                // 1. Safely register original materials, explicitly skipping any wireframe overlays
                 o.mesh.traverse(c => {
                     if (c.userData && c.userData.isWireframeOverlay) return;
                     if (c.isMesh && !c.userData.originalMaterial) c.userData.originalMaterial = c.material;
                 });
                 
-                // 2. Handle wireframe overlay creation
                 if (this.showWireframe && !o.mesh.userData.wireframeMeshList) {
                     const wireMat = new this.THREE.MeshBasicMaterial({ 
                         color: 0x00d2ff, wireframe: true, transparent: true, opacity: 0.8,
@@ -1598,7 +1506,7 @@ class BlockoutViewport {
                     
                     o.mesh.userData.wireframeMeshList = [];
                     o.mesh.traverse(c => {
-                        if (c.userData && c.userData.isWireframeOverlay) return; // Prevent infinite nesting
+                        if (c.userData && c.userData.isWireframeOverlay) return; 
                         if (c.isMesh && c.userData.originalMaterial) {
                             const wm = new this.THREE.Mesh(c.geometry, wireMat);
                             wm.userData.isWireframeOverlay = true;
@@ -1608,14 +1516,12 @@ class BlockoutViewport {
                     });
                 }
 
-                // 3. Toggle wireframe visibility
                 if (o.mesh.userData.wireframeMeshList) {
                     o.mesh.userData.wireframeMeshList.forEach(wm => wm.visible = this.showWireframe);
                 }
 
-                // 4. Apply Shaded or Depth materials strictly to the BASE meshes
                 o.mesh.traverse(c => {
-                    if (c.userData && c.userData.isWireframeOverlay) return; // Leave overlays alone
+                    if (c.userData && c.userData.isWireframeOverlay) return;
                     if (c.isMesh && c.userData.originalMaterial) {
                         if (this.isDepthMode) {
                             if (!c.userData.depthMat || !c.userData.depthMat.isMaterial) {
@@ -1657,37 +1563,33 @@ class BlockoutViewport {
         this.camera.updateProjectionMatrix();
     }
 
-    // =========================================================================
-    // KEYBOARD SHORTCUTS (Blender-style)
-    // =========================================================================
-
     handleKeyDown(e) {
         if (!this.isHovered) return;
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
         switch (e.key.toLowerCase()) {
-            case 'g': // Grab (Translate)
+            case 'g':
                 this.transformControls.setMode("translate");
                 this.updateGizmoUI("translate");
                 break;
-            case 'r': // Rotate
+            case 'r':
                 this.transformControls.setMode("rotate");
                 this.updateGizmoUI("rotate");
                 break;
-            case 's': // Scale
+            case 's':
                 this.transformControls.setMode("scale");
                 this.updateGizmoUI("scale");
                 break;
-            case 'x': // Delete selected
+            case 'x':
             case 'delete':
                 this.deleteSelectedObject();
                 break;
-            case 'h': // Toggle visibility
+            case 'h':
                 if (this.selectedObjectId !== null) {
                     this.toggleObjectVisibility(this.selectedObjectId);
                 }
                 break;
-            case 'f2': // Rename
+            case 'f2':
                 this.promptRenameSelected();
                 break;
             case 'escape':
@@ -1695,29 +1597,22 @@ class BlockoutViewport {
                 break;
         }
 
-        // F2 comes as e.key === "F2" (not lowercase)
         if (e.key === 'F2') {
             this.promptRenameSelected();
         }
     }
-
-    // =========================================================================
-    // BAKE (SEND TO GRAPH)
-    // =========================================================================
 
     async performBake(btnEl) {
         if (!this.node || !this.renderer) return;
         const originalText = btnEl.innerText;
         btnEl.innerText = "BAKING...";
 
-        // 1. Get Target Resolution
         let targetW = 512, targetH = 512;
         const ww = this.node.widgets?.find(w => w.name === "width");
         const wh = this.node.widgets?.find(w => w.name === "height");
         if (ww) targetW = ww.value;
         if (wh) targetH = wh.value;
 
-        // 2. Save Current State
         const vpDiv = this.renderer.domElement.parentElement;
         const origW = vpDiv.clientWidth;
         const origH = vpDiv.clientHeight;
@@ -1726,7 +1621,6 @@ class BlockoutViewport {
         const origWireframe = this.showWireframe;
         const origDepth = this.isDepthMode;
 
-        // Hide Helpers and Wireframes
         const helpers = [];
         this.scene.traverse(c => {
             if (
@@ -1746,22 +1640,18 @@ class BlockoutViewport {
             }
         });
         
-        // Explicitly hide transform controls and its invisible planes
         if (this.transformControls.visible) {
             helpers.push(this.transformControls);
             this.transformControls.visible = false;
         }
 
-        // Hide Floor and fixed camera representations
         const fixed = this.sceneObjects.filter(o => o.isFixed || o.type === 'camera');
         fixed.forEach(o => { if (o.mesh && o.mesh.visible) { helpers.push(o.mesh); o.mesh.visible = false; }});
         if (this.floor && this.floor.visible) { helpers.push(this.floor); this.floor.visible = false; }
 
-        // Detach gizmo to ensure it doesn't render
         let attachedObject = this.transformControls.object;
         if (attachedObject) this.transformControls.detach();
 
-        // Hide Light Gizmos (materials only, so they still emit light)
         const lights = this.sceneObjects.filter(o => ['pointlight', 'directionallight', 'spotlight'].includes(o.type));
         lights.forEach(l => {
             if (l.mesh && l.mesh.material) {
@@ -1769,13 +1659,10 @@ class BlockoutViewport {
             }
         });
 
-
-        // 3. Setup Capture Canvas
         this.renderer.setSize(targetW, targetH, false);
         this.camera.aspect = targetW / targetH;
         this.camera.updateProjectionMatrix();
 
-        // Ensure rendering finishes before capture
         const captureFrame = async () => {
             return new Promise(resolve => {
                 requestAnimationFrame(() => {
@@ -1787,12 +1674,10 @@ class BlockoutViewport {
 
         const origOverride = this.scene.overrideMaterial;
 
-        // SHADED PASS
         this.displayMode = "shaded";
         this.showWireframe = false;
         this.isDepthMode = false;
         
-        // Hide custom lights so shaded pass is lit neutrally
         const activeLights = [];
         lights.forEach(l => {
             const actualLight = l.mesh.isLight ? l.mesh : l.mesh.children.find(c => c.isLight);
@@ -1805,20 +1690,16 @@ class BlockoutViewport {
         this.updateDisplayMode();
         const shaded64 = await captureFrame();
         
-        // Restore custom lights for textured pass
         activeLights.forEach(l => l.visible = true);
 
-        // TEXTURE PASS
         this.displayMode = "textured";
         this.updateDisplayMode();
         const textured64 = await captureFrame();
 
-        // DEPTH PASS
         this.isDepthMode = true;
         this.updateDisplayMode();
         const depth64 = await captureFrame();
 
-        // NORMAL PASS
         this.isDepthMode = false;
         this.updateDisplayMode();
         const normalMat = new this.THREE.MeshNormalMaterial();
@@ -1826,7 +1707,6 @@ class BlockoutViewport {
         const normal64 = await captureFrame();
         this.scene.overrideMaterial = origOverride;
 
-        // 4. Restore State
         this.displayMode = origDisplayMode;
         this.showWireframe = origWireframe;
         this.isDepthMode = origDepth;
@@ -1844,7 +1724,6 @@ class BlockoutViewport {
         this.camera.aspect = origAspect;
         this.camera.updateProjectionMatrix();
 
-        // 5. Send to Node
         const payload = {
             shaded: shaded64,
             textured: textured64,
@@ -1857,14 +1736,9 @@ class BlockoutViewport {
             wData.value = JSON.stringify(payload);
         }
 
-        // 6. Queue Prompt
         btnEl.innerText = originalText;
         app.queuePrompt(0);
     }
-
-    // =========================================================================
-    // RESIZE (unchanged)
-    // =========================================================================
 
     onResize(vpDiv) {
         if (!this.renderer || !vpDiv || !this.camera) return;
@@ -1885,7 +1759,6 @@ class BlockoutViewport {
             return;
         }
 
-        // Get node width/height from widgets
         let targetW = 512;
         let targetH = 512;
         if (this.node && this.node.widgets) {
@@ -1904,11 +1777,9 @@ class BlockoutViewport {
 
         let gw, gh;
         if (targetAspect > viewAspect) {
-            // Target is wider than viewport -> fit width
             gw = vw - 40; 
             gh = gw / targetAspect;
         } else {
-            // Target is taller than viewport -> fit height
             gh = vh - 40; 
             gw = gh * targetAspect;
         }
@@ -1917,10 +1788,6 @@ class BlockoutViewport {
         this.gate.style.height = `${gh}px`;
         this.gate.style.display = "block";
     }
-
-    // =========================================================================
-    // SIZE REFERENCE (1.68m Human Silhouette)
-    // =========================================================================
 
     buildSizeReference() {
         const baseUrl = new URL(".", import.meta.url).href;
@@ -1937,10 +1804,9 @@ class BlockoutViewport {
             });
             
             this.sizeRefSprite = new this.THREE.Sprite(mat);
-            // Scale: image aspect ratio ~ 1:2 (width:height), height = 1.68m
             const aspect = texture.image.width / texture.image.height;
             this.sizeRefSprite.scale.set(1.68 * aspect, 1.68, 1);
-            this.sizeRefSprite.position.set(0, 1.68 / 2, 0); // Stand on floor
+            this.sizeRefSprite.position.set(0, 1.68 / 2, 0);
             this.sizeRefSprite.userData.isHelper = true;
             this.sizeRefSprite.visible = this.sizeRefVisible;
             this.sizeRefSprite.renderOrder = 999;
@@ -1955,10 +1821,6 @@ class BlockoutViewport {
         if (this.sizeRefSprite) this.sizeRefSprite.visible = this.sizeRefVisible;
     }
 
-    // =========================================================================
-    // PIVOT MODE
-    // =========================================================================
-
     setPivotMode(mode) {
         const obj = this.getSelectedObject();
         if (!obj || !obj.mesh) return;
@@ -1966,12 +1828,10 @@ class BlockoutViewport {
         const m = obj.mesh;
 
         if (mode === 'center') {
-            // Move pivot to bounding box center
             const box = new this.THREE.Box3().setFromObject(m);
             const center = box.getCenter(new this.THREE.Vector3());
             const offset = center.clone().sub(m.position);
             
-            // Shift all geometry so the visual stays in place but pivot moves
             m.traverse(c => {
                 if (c.isMesh && c.geometry) {
                     c.geometry.translate(-offset.x, -offset.y, -offset.z);
@@ -1979,8 +1839,6 @@ class BlockoutViewport {
             });
             m.position.copy(center);
         } else if (mode === 'origin') {
-            // Move pivot back to local origin (0,0,0 relative to geometry center)
-            // We just recenter the geometry at local origin
             const box = new this.THREE.Box3().setFromObject(m);
             const center = box.getCenter(new this.THREE.Vector3());
             const offset = center.clone().sub(m.position);
@@ -1995,17 +1853,12 @@ class BlockoutViewport {
             }
         }
 
-        // Refresh gizmo
         if (this.transformControls.object === m) {
             this.transformControls.detach();
             this.transformControls.attach(m);
         }
         this.syncPropertiesPanel();
     }
-
-    // =========================================================================
-    // SNAP CONTROLS
-    // =========================================================================
 
     buildSnapControls(vpDiv) {
         const panel = document.createElement("div");
@@ -2016,7 +1869,6 @@ class BlockoutViewport {
             fontSize: "11px"
         });
 
-        // Snap toggle
         const chk = document.createElement("input");
         chk.type = "checkbox";
         chk.checked = this.snapToGrid;
@@ -2027,7 +1879,6 @@ class BlockoutViewport {
         lbl.innerText = "Snap to Grid";
         lbl.style.color = "#ccc";
 
-        // Grid unit
         const unitLbl = document.createElement("span");
         unitLbl.innerText = "Unit:";
         Object.assign(unitLbl.style, { color: "#888", fontSize: "10px" });
@@ -2044,7 +1895,6 @@ class BlockoutViewport {
         unitInp.onchange = () => { this.snapUnit = parseFloat(unitInp.value) || 0.5; this.updateSnapping(); };
         unitInp.addEventListener('keydown', e => e.stopPropagation());
 
-        // Rotation snap
         const rotLbl = document.createElement("span");
         rotLbl.innerText = "Rot:";
         Object.assign(rotLbl.style, { color: "#888", fontSize: "10px" });
@@ -2082,58 +1932,58 @@ class BlockoutViewport {
     }
 
     // =========================================================================
-    // CREATION PANEL (BOTTOM)
+    // CREATION PANEL (BOTTOM) - REDESIGNED
     // =========================================================================
 
     buildCreationPanel(panelDiv) {
-        // Tabs area
+        // --- NEW SVG ICONS FOR CATEGORIES ---
+        const icons = {
+            basic: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>`,
+            lighting: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5A4.61 4.61 0 0 1 8.91 14"/></svg>`,
+            architecture: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-4h6v4M7 11h2M15 11h2M7 15h2M15 15h2"/></svg>`,
+            vehicle: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2"/><circle cx="7" cy="17" r="2"/><path d="M9 17h6"/><circle cx="17" cy="17" r="2"/></svg>`,
+            furniture: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h20v4H2z"/><path d="M2 12v8"/><path d="M22 12v8"/><path d="M6 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v2"/></svg>`,
+            props: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>`,
+            plants: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/></svg>`,
+            food: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8h1a4 4 0 0 1 0 8h-1M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8zM6 1v3M10 1v3M14 1v3"/></svg>`
+        };
+
+        const categories = [
+            { id: "basic", label: "BASIC SHAPES", icon: icons.basic },
+            { id: "lighting", label: "LIGHTING", icon: icons.lighting },
+            { id: "architecture", label: "ARCHITECTURE", icon: icons.architecture },
+            { id: "vehicle", label: "VEHICLES", icon: icons.vehicle },
+            { id: "furniture", label: "FURNITURE", icon: icons.furniture },
+            { id: "props", label: "PROPS", icon: icons.props },
+            { id: "plants", label: "PLANTS", icon: icons.plants },
+            { id: "food", label: "FOOD", icon: icons.food }
+        ];
+
+        // --- TABS BAR ---
         const tabsRow = document.createElement("div");
         Object.assign(tabsRow.style, {
             display: "flex", background: "#222", borderBottom: "1px solid #333",
-            justifyContent: "space-between"
+            justifyContent: "space-between", alignItems: "stretch"
         });
         panelDiv.appendChild(tabsRow);
 
         const leftTabs = document.createElement("div");
-        leftTabs.style.display = "flex";
+        Object.assign(leftTabs.style, { display: "flex", overflowX: "auto", flex: "1" });
         tabsRow.appendChild(leftTabs);
 
-        const tabBasic = document.createElement("div");
-        tabBasic.innerText = "Basic Shapes";
-        Object.assign(tabBasic.style, {
-            padding: "4px 12px", background: "#1a1a1a", borderTop: "2px solid #00d2ff",
-            color: "#ccc", fontSize: "11px", fontWeight: "bold", textTransform: "uppercase", cursor: "pointer"
-        });
-        leftTabs.appendChild(tabBasic);
+        this.tabButtons = {};
+        this.contentPanes = {};
 
-        const tabLighting = document.createElement("div");
-        tabLighting.innerText = "Lighting";
-        Object.assign(tabLighting.style, {
-            padding: "4px 12px", background: "#222", borderTop: "2px solid transparent",
-            color: "#888", fontSize: "11px", fontWeight: "bold", textTransform: "uppercase", cursor: "pointer"
-        });
-        leftTabs.appendChild(tabLighting);
-
-        const exportBtn = document.createElement("button");
-        exportBtn.innerText = "Export GLB to Action Director";
-        Object.assign(exportBtn.style, {
-            background: "transparent", color: "#00d2ff", border: "none", borderLeft: "1px solid #333",
-            padding: "4px 16px", fontSize: "11px", fontWeight: "bold", textTransform: "uppercase",
-            cursor: "pointer", transition: "all 0.1s"
-        });
-        exportBtn.onmouseover = () => { exportBtn.style.background = "#333"; };
-        exportBtn.onmouseout = () => { exportBtn.style.background = "transparent"; };
-        exportBtn.onclick = () => this.exportGLB();
-
+        // Action Buttons on Right
         const rightTabs = document.createElement("div");
-        rightTabs.style.display = "flex";
+        Object.assign(rightTabs.style, { display: "flex", alignItems: "center", paddingRight: "8px" });
 
         const importBtn = document.createElement("button");
         importBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M5 20h14v-2H5v2zm7-18L5.33 8.67h4V14h5.34V8.67h4L12 2z"/></svg>`;
         importBtn.title = "Import GLB / GLTF / FBX";
         Object.assign(importBtn.style, {
-            background: "transparent", color: "#0f0", border: "none", borderLeft: "1px solid #333",
-            padding: "4px 8px", cursor: "pointer", transition: "all 0.1s", display: "flex", alignItems: "center", justifyContent: "center"
+            background: "transparent", color: "#0f0", border: "1px solid #333", borderRadius: "4px",
+            padding: "4px 8px", cursor: "pointer", transition: "all 0.1s", display: "flex", alignItems: "center", justifyContent: "center", marginRight: "8px"
         });
         importBtn.onmouseover = () => { importBtn.style.background = "#333"; };
         importBtn.onmouseout = () => { importBtn.style.background = "transparent"; };
@@ -2150,49 +2000,144 @@ class BlockoutViewport {
             
             if (ext === 'fbx') {
                 const loader = new this.FBXLoader();
-                loader.load(url, (fbx) => {
-                    this.addObject("imported", fbx, file.name);
-                });
+                loader.load(url, (fbx) => { this.addObject("imported", fbx, file.name); });
             } else {
                 const loader = new this.GLTFLoader();
-                loader.load(url, (gltf) => {
-                    this.addObject("imported", gltf.scene, file.name);
-                });
+                loader.load(url, (gltf) => { this.addObject("imported", gltf.scene, file.name); });
             }
         };
         importBtn.onclick = () => fileIn.click();
-        
+
+        const exportBtn = document.createElement("button");
+        exportBtn.innerText = "Export to Graph";
+        Object.assign(exportBtn.style, {
+            background: "transparent", color: "#00d2ff", border: "1px solid #333", borderRadius: "4px",
+            padding: "4px 12px", fontSize: "11px", fontWeight: "bold", textTransform: "uppercase",
+            cursor: "pointer", transition: "all 0.1s"
+        });
+        exportBtn.onmouseover = () => { exportBtn.style.background = "#333"; };
+        exportBtn.onmouseout = () => { exportBtn.style.background = "transparent"; };
+        exportBtn.onclick = () => this.exportGLB();
+
         rightTabs.appendChild(fileIn);
         rightTabs.appendChild(importBtn);
         rightTabs.appendChild(exportBtn);
         tabsRow.appendChild(rightTabs);
 
-        // Content area
-        const contentBasic = document.createElement("div");
-        Object.assign(contentBasic.style, {
-            flex: "1", display: "flex", alignItems: "center", padding: "8px 12px", gap: "8px", overflowX: "auto"
+        // --- BUILD TABS AND PANES ---
+        categories.forEach((cat, index) => {
+            // Tab Button
+            const tabBtn = document.createElement("div");
+            Object.assign(tabBtn.style, {
+                padding: "6px 16px", background: index === 0 ? "#2b3035" : "transparent", 
+                borderBottom: index === 0 ? "2px solid #00d2ff" : "2px solid transparent",
+                color: index === 0 ? "#fff" : "#888", fontSize: "10px", fontWeight: "bold", textTransform: "uppercase", 
+                cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: "4px",
+                transition: "all 0.1s"
+            });
+            
+            tabBtn.innerHTML = `<div>${cat.icon}</div><div>${cat.label}</div>`;
+            leftTabs.appendChild(tabBtn);
+            this.tabButtons[cat.id] = tabBtn;
+
+            // Content Pane
+            const pane = document.createElement("div");
+            Object.assign(pane.style, {
+                flex: "1", display: index === 0 ? "flex" : "none", flexWrap: "wrap", alignContent: "flex-start",
+                padding: "8px 12px", gap: "8px", overflowY: "auto", overflowX: "hidden"
+            });
+            panelDiv.appendChild(pane);
+            this.contentPanes[cat.id] = pane;
+
+            // Click Handler
+            tabBtn.onclick = () => {
+                Object.values(this.tabButtons).forEach(b => {
+                    b.style.background = "transparent";
+                    b.style.borderBottomColor = "transparent";
+                    b.style.color = "#888";
+                });
+                Object.values(this.contentPanes).forEach(p => p.style.display = "none");
+                
+                tabBtn.style.background = "#2b3035";
+                tabBtn.style.borderBottomColor = "#00d2ff";
+                tabBtn.style.color = "#fff";
+                pane.style.display = "flex";
+            };
+
+            // Populate logic
+            if (cat.id === "basic" || cat.id === "lighting") {
+                this.populateCoreAssets(cat.id, pane);
+            } else {
+                this.populateCustomAssets(cat.id, pane);
+            }
         });
-        panelDiv.appendChild(contentBasic);
+    }
 
-        const contentLighting = document.createElement("div");
-        Object.assign(contentLighting.style, {
-            flex: "1", display: "none", alignItems: "center", padding: "8px 12px", gap: "8px", overflowX: "auto"
+    populateCustomAssets(category, targetDiv) {
+        const files = this.availableAssets[category] || [];
+        
+        if (files.length === 0) {
+            const emptyMsg = document.createElement("div");
+            emptyMsg.innerText = `No .glb templates found in web/blockout/${category}/`;
+            Object.assign(emptyMsg.style, { color: "#555", fontSize: "11px", fontStyle: "italic", padding: "10px" });
+            targetDiv.appendChild(emptyMsg);
+            return;
+        }
+
+        files.forEach(filename => {
+            const btn = document.createElement("div");
+            Object.assign(btn.style, {
+                background: "#222", color: "#ccc", border: "1px solid #444",
+                borderRadius: "6px", cursor: "pointer", fontSize: "10px", fontWeight: "bold",
+                transition: "all 0.1s", display: "flex", flexDirection: "column",
+                alignItems: "center", overflow: "hidden", width: "70px", flexShrink: "0"
+            });
+
+            const iconArea = document.createElement("div");
+            Object.assign(iconArea.style, {
+                width: "70px", height: "50px", display: "flex", alignItems: "center",
+                justifyContent: "center", background: "#2a2a2a", overflow: "hidden"
+            });
+            
+            // Generate path for the thumbnail based on the .glb filename
+            const baseName = filename.substring(0, filename.lastIndexOf('.'));
+            const baseUrl = new URL(".", import.meta.url).href;
+            const thumbUrl = new URL(`../blockout/${category}/${baseName}.png`, baseUrl).href;
+
+            const fallbackSVG = `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#00d2ff" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>`;
+
+            // Try to load the .png thumbnail
+            const img = document.createElement("img");
+            img.src = thumbUrl;
+            Object.assign(img.style, { width: "100%", height: "100%", objectFit: "cover" });
+            
+            // If the thumbnail file doesn't exist, safely fallback to the generic icon
+            img.onerror = () => {
+                iconArea.innerHTML = fallbackSVG;
+            };
+            
+            iconArea.appendChild(img);
+            btn.appendChild(iconArea);
+
+            const lbl = document.createElement("div");
+            lbl.innerText = filename.split('.')[0].substring(0, 10); // Truncate visually
+            lbl.title = filename;
+            Object.assign(lbl.style, { 
+                padding: "4px", width: "100%", textAlign: "center", background: "#1a1a1a", 
+                borderTop: "1px solid #444", boxSizing: "border-box", overflow: "hidden", 
+                textOverflow: "ellipsis", whiteSpace: "nowrap" 
+            });
+            btn.appendChild(lbl);
+
+            btn.onmouseover = () => { btn.style.borderColor = "#00d2ff"; btn.style.transform = "translateY(-2px)"; lbl.style.color = "#00d2ff"; };
+            btn.onmouseout = () => { btn.style.borderColor = "#444"; btn.style.transform = "none"; lbl.style.color = "#ccc"; };
+            btn.onclick = () => this.loadCategoryAsset(category, filename);
+
+            targetDiv.appendChild(btn);
         });
-        panelDiv.appendChild(contentLighting);
+    }
 
-        // Toggle logic
-        tabBasic.onclick = () => {
-            tabBasic.style.background = "#1a1a1a"; tabBasic.style.borderTopColor = "#00d2ff"; tabBasic.style.color = "#ccc";
-            tabLighting.style.background = "#222"; tabLighting.style.borderTopColor = "transparent"; tabLighting.style.color = "#888";
-            contentBasic.style.display = "flex"; contentLighting.style.display = "none";
-        };
-        tabLighting.onclick = () => {
-            tabLighting.style.background = "#1a1a1a"; tabLighting.style.borderTopColor = "#00d2ff"; tabLighting.style.color = "#ccc";
-            tabBasic.style.background = "#222"; tabBasic.style.borderTopColor = "transparent"; tabBasic.style.color = "#888";
-            contentLighting.style.display = "flex"; contentBasic.style.display = "none";
-        };
-
-        // Setup a temporary renderer for previews
+    populateCoreAssets(category, targetRow) {
         const prevSize = 80;
         const prevRenderer = new this.THREE.WebGLRenderer({ alpha: true, antialias: true });
         prevRenderer.setSize(prevSize, prevSize);
@@ -2207,7 +2152,6 @@ class BlockoutViewport {
         prevScene.add(prevLight1, prevLight2);
 
         const renderPreviewToCanvas = (meshParams) => {
-            // clear old mesh
             const toRemove = [];
             prevScene.traverse(c => { if (c.isMesh) toRemove.push(c); });
             toRemove.forEach(c => {
@@ -2216,7 +2160,6 @@ class BlockoutViewport {
                 prevScene.remove(c);
             });
             
-            // create new mesh
             let geo;
             const mat = new this.THREE.MeshStandardMaterial({ color: 0x00d2ff, roughness: 0.3, metalness: 0.1 });
             if (meshParams.type === 'cube') geo = new this.THREE.BoxGeometry(1.5, 1.5, 1.5);
@@ -2233,9 +2176,7 @@ class BlockoutViewport {
                 geo = new this.THREE.ExtrudeGeometry(shape, { depth: 2, curveSegments: 32, bevelEnabled: false });
                 geo.translate(0, 0, -1);
             } else if (meshParams.type === 'torus') geo = new this.THREE.TorusGeometry(0.8, 0.3, 16, 64);
-            else {
-                return null;
-            }
+            else return null;
             
             const mesh = new this.THREE.Mesh(geo, mat);
             if (meshParams.type === 'plane') mesh.rotation.x = -Math.PI / 2;
@@ -2251,57 +2192,60 @@ class BlockoutViewport {
             return canvas2d;
         };
 
-        const createAssetBtn = (label, type, targetRow, isLight=false) => {
+        const createAssetBtn = (label, type, isLight=false) => {
             const btn = document.createElement("div");
             Object.assign(btn.style, {
                 background: "#222", color: "#ccc", border: "1px solid #444",
                 borderRadius: "6px", cursor: "pointer", fontSize: "11px", fontWeight: "bold",
                 transition: "all 0.1s", display: "flex", flexDirection: "column",
-                alignItems: "center", overflow: "hidden", width: "80px", flexShrink: "0"
+                alignItems: "center", overflow: "hidden", width: "70px", flexShrink: "0"
             });
             
             if (!isLight) {
                 const canvas = renderPreviewToCanvas({ type });
                 if (canvas) {
+                    canvas.style.width = "70px";
+                    canvas.style.height = "50px";
+                    canvas.style.objectFit = "cover";
                     btn.appendChild(canvas);
                 } else {
                     const ph = document.createElement("div");
-                    Object.assign(ph.style, { width: "80px", height: "80px", background: "#2a2a2a" });
+                    Object.assign(ph.style, { width: "70px", height: "50px", background: "#2a2a2a" });
                     btn.appendChild(ph);
                 }
             } else {
                 const icon = document.createElement("div");
-                const svgLight = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#ffcc00" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`;
+                const svgLight = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#ffcc00" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`;
                 icon.innerHTML = svgLight;
-                Object.assign(icon.style, { width: "80px", height: "80px", display: "flex", alignItems: "center", justifyContent: "center", background: "#2a2a2a" });
+                Object.assign(icon.style, { width: "70px", height: "50px", display: "flex", alignItems: "center", justifyContent: "center", background: "#2a2a2a" });
                 btn.appendChild(icon);
             }
 
             const lbl = document.createElement("div");
             lbl.innerText = label;
-            Object.assign(lbl.style, { padding: "6px", width: "100%", textAlign: "center", background: "#1a1a1a", borderTop: "1px solid #444", boxSizing: "border-box" });
+            Object.assign(lbl.style, { padding: "4px", width: "100%", textAlign: "center", background: "#1a1a1a", borderTop: "1px solid #444", boxSizing: "border-box" });
             btn.appendChild(lbl);
 
             btn.onmouseover = () => { btn.style.borderColor = "#00d2ff"; btn.style.transform = "translateY(-2px)"; lbl.style.color = "#00d2ff"; };
             btn.onmouseout = () => { btn.style.borderColor = "#444"; btn.style.transform = "none"; lbl.style.color = "#ccc"; };
             btn.onclick = () => this.addObject(type);
             targetRow.appendChild(btn);
-            return btn;
         };
 
-        createAssetBtn("Cube", "cube", contentBasic);
-        createAssetBtn("Plane", "plane", contentBasic);
-        createAssetBtn("Sphere", "sphere", contentBasic);
-        createAssetBtn("Cone", "cone", contentBasic);
-        createAssetBtn("Cylinder", "cylinder", contentBasic);
-        createAssetBtn("Pipe", "pipe", contentBasic);
-        createAssetBtn("Torus", "torus", contentBasic);
-
-        createAssetBtn("Point", "pointlight", contentLighting, true);
-        createAssetBtn("Dir", "directionallight", contentLighting, true);
-        createAssetBtn("Spot", "spotlight", contentLighting, true);
+        if (category === "basic") {
+            createAssetBtn("Cube", "cube");
+            createAssetBtn("Plane", "plane");
+            createAssetBtn("Sphere", "sphere");
+            createAssetBtn("Cone", "cone");
+            createAssetBtn("Cylinder", "cylinder");
+            createAssetBtn("Pipe", "pipe");
+            createAssetBtn("Torus", "torus");
+        } else if (category === "lighting") {
+            createAssetBtn("Point", "pointlight", true);
+            createAssetBtn("Dir", "directionallight", true);
+            createAssetBtn("Spot", "spotlight", true);
+        }
         
-        // Dispose temp renderer to free resources
         prevRenderer.dispose();
     }
 
@@ -2363,15 +2307,13 @@ class BlockoutViewport {
             
             const clone = obj.mesh.clone();
 
-                    // Strip out wireframe overlays safely for all THREE.js versions
-                    const overlays = [];
-                    clone.traverse(c => {
-                        if (c.userData && c.userData.isWireframeOverlay) overlays.push(c);
-                    });
-                    overlays.forEach(c => {
-                        if (c.parent) c.parent.remove(c);
-                    });
-            
+            const overlays = [];
+            clone.traverse(c => {
+                if (c.userData && c.userData.isWireframeOverlay) overlays.push(c);
+            });
+            overlays.forEach(c => {
+                if (c.parent) c.parent.remove(c);
+            });
 
             clone.traverse(c => {
                 if (c.userData) {
@@ -2454,7 +2396,6 @@ class BlockoutViewport {
                     if (obj.type === 'pointlight' || obj.type === 'directionallight' || obj.type === 'spotlight') return; 
                     const clone = obj.mesh.clone();
                     
-                    // Strip out wireframe overlays safely for all THREE.js versions
                     const overlays = [];
                     clone.traverse(c => {
                         if (c.userData && c.userData.isWireframeOverlay) overlays.push(c);
@@ -2462,7 +2403,6 @@ class BlockoutViewport {
                     overlays.forEach(c => {
                         if (c.parent) c.parent.remove(c);
                     });
-                    
 
                     clone.traverse(c => {
                         if (c.userData) {
@@ -2571,24 +2511,20 @@ class BlockoutViewport {
                 
                 const loader = new this.GLTFLoader();
                 loader.load(url, (gltf) => {
-                    // Detach gizmo safely BEFORE mass deletion
                     this.selectObjectById(null);
 
-                    // Clear existing non-fixed
                     const toDelete = this.sceneObjects.filter(o => !o.isFixed).map(o => o.id);
                     toDelete.forEach(id => this.deleteObject(id));
 
-                    // Import children
                     const children = [...gltf.scene.children];
                     children.forEach(child => {
                         gltf.scene.remove(child);
                         child.userData.isSceneLoad = true;
                         const type = child.userData.blockoutType || "imported";
                         const bname = child.userData.blockoutName || child.name || "Loaded_Obj";
-                        this.addObject(type, child, bname, false); // AutoSelect false!
+                        this.addObject(type, child, bname, false); 
                     });
 
-                    // Safely extract custom payload catching all THREE.js edge cases
                     let ex = null;
                     if (gltf.parser && gltf.parser.json && gltf.parser.json.asset && gltf.parser.json.asset.extras) {
                         ex = gltf.parser.json.asset.extras;
@@ -2599,7 +2535,7 @@ class BlockoutViewport {
                     } else if (gltf.scene && gltf.scene.userData) {
                         ex = gltf.scene.userData;
                     } else if (gltf.scenes && gltf.scenes[0] && gltf.scenes[0].extras) {
-                        ex = gltf.scenes[0].extras; // Legacy fallback
+                        ex = gltf.scenes[0].extras; 
                     }
 
                     if (ex) {
@@ -2648,10 +2584,6 @@ class BlockoutViewport {
         );
     }
 
-    // =========================================================================
-    // RENDER LOOP (unchanged)
-    // =========================================================================
-
     animate() {
         if (!this.renderer) return;
         requestAnimationFrame(() => this.animate());
@@ -2660,15 +2592,10 @@ class BlockoutViewport {
         this.renderer.render(this.scene, this.camera);
     }
 
-    // =========================================================================
-    // CLEANUP
-    // =========================================================================
-
     destroy() {
         if (this._handleKeyDown) window.removeEventListener('keydown', this._handleKeyDown);
         if (this.resizeObserver) this.resizeObserver.disconnect();
 
-        // Dispose all managed objects
         this.sceneObjects.forEach(entry => {
             this.scene.remove(entry.mesh);
             if (entry.mesh.geometry) entry.mesh.geometry.dispose();
@@ -2683,7 +2610,6 @@ class BlockoutViewport {
     }
 }
 
-// --- COMFYUI EXTENSION REGISTRATION ---
 app.registerExtension({
     name: "Yedp.Blockout",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
