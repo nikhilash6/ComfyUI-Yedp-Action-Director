@@ -21,7 +21,6 @@ if "yedp_envs" not in folder_paths.folder_names_and_paths:
 if "yedp_cams" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_cams"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_cams")], {".glb", ".fbx"})
 
-# NEW: Added rigs to the configuration so uploads have a dedicated folder
 if "yedp_rigs" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["yedp_rigs"] = ([os.path.join(folder_paths.get_input_directory(), "yedp_rigs")], {".glb", ".gltf", ".fbx"})
 
@@ -250,7 +249,30 @@ class YedpBlockout:
 
 # --- API ROUTES ---
 
-# NEW: Upload Route for General Custom Assets
+@PromptServer.instance.routes.get("/yedp/get_blockout_assets")
+async def get_blockout_assets(request):
+    """
+    Scans the local web/blockout/ subdirectories for custom user templates.
+    """
+    base_dir = os.path.join(os.path.dirname(__file__), "web", "blockout")
+    assets = {}
+    categories = ["architecture", "vehicle", "furniture", "props", "plants", "food" ]
+    
+    for cat in categories:
+        cat_dir = os.path.join(base_dir, cat)
+        try:
+            os.makedirs(cat_dir, exist_ok=True)
+        except Exception:
+            pass # Symlinks or permissions might throw, safely ignore
+            
+        if os.path.exists(cat_dir):
+            assets[cat] = [f for f in os.listdir(cat_dir) if f.lower().endswith(('.glb', '.gltf', '.fbx'))]
+        else:
+            assets[cat] = []
+            
+    return web.json_response({"assets": assets})
+
+
 @PromptServer.instance.routes.post("/yedp/upload_asset")
 async def upload_asset(request):
     try:
@@ -273,18 +295,16 @@ async def upload_asset(request):
                 if subfolder not in folder_paths.folder_names_and_paths:
                     return web.json_response({"status": "error", "message": "Invalid subfolder configuration"}, status=400)
                 
-                # --- SYMLINK FIX INTEGRATED HERE ---
                 target_dir = folder_paths.folder_names_and_paths[subfolder][0][0]
                 target_dir = os.path.realpath(target_dir) # Resolves Windows/Linux Symlinks perfectly
                 try:
                     os.makedirs(target_dir, exist_ok=True)
                 except Exception as e:
-                    pass # Symlink likely already exists and handles the routing
-                # -----------------------------------
+                    pass 
                 
                 file_path = os.path.join(target_dir, safe_name)
                 
-                # Stream the file in chunks (saves system RAM for large files)
+                # Stream the file in chunks
                 with open(file_path, "wb") as f:
                     while True:
                         chunk = await field.read_chunk()
@@ -382,11 +402,11 @@ async def save_scene(request):
             safe_name += ".json"
 
         scene_dir = folder_paths.folder_names_and_paths["yedp_blockout"][0][0]
-        scene_dir = os.path.realpath(scene_dir) # Resolves Windows Symlinks perfectly
+        scene_dir = os.path.realpath(scene_dir)
         try:
             os.makedirs(scene_dir, exist_ok=True)
         except Exception as e:
-            pass # Symlink likely already exists and handles the routing
+            pass 
         
         file_path = os.path.join(scene_dir, safe_name)
         
@@ -406,10 +426,6 @@ async def save_scene(request):
 
 @PromptServer.instance.routes.post("/yedp/upload_payload_chunk")
 async def upload_payload_chunk(request):
-    """
-    Receives individual render passes to prevent reaching the 100MB aiohttp size limit.
-    Now supports chunking inside the passes using list extension.
-    """
     data = await request.json()
     payload_id = data.get("payload_id")
     pass_name = data.get("pass")
@@ -422,7 +438,6 @@ async def upload_payload_chunk(request):
     if pass_name not in YEDP_CHUNKS[payload_id]:
         YEDP_CHUNKS[payload_id][pass_name] = []
         
-    # Crucial Fix: Extend the existing array instead of overwriting it
     YEDP_CHUNKS[payload_id][pass_name].extend(frames)
     
     return web.json_response({"status": "ok"})
@@ -430,9 +445,6 @@ async def upload_payload_chunk(request):
 
 @PromptServer.instance.routes.post("/yedp/upload_payload_finish")
 async def upload_payload_finish(request):
-    """
-    Consolidates the chunks into the final memory payload ready for the node execution.
-    """
     data = await request.json()
     payload_id = data.get("payload_id")
     
@@ -450,12 +462,10 @@ async def upload_payload_finish(request):
 
 @PromptServer.instance.routes.get("/yedp/get_rigs")
 async def get_rigs(request):
-    # Retrieve user-uploaded rigs from the input directory
     files = folder_paths.get_filename_list("yedp_rigs")
     if not files:
         files = []
         
-    # Add legacy/default rigs from the web folder
     web_dir = os.path.join(os.path.dirname(__file__), "web")
     if os.path.exists(web_dir):
         web_files = [f for f in os.listdir(web_dir) if f.lower().endswith(('.glb', '.gltf', '.fbx'))]
@@ -463,20 +473,14 @@ async def get_rigs(request):
             if wf not in files:
                 files.append(wf)
     
-    # Guarantee the fallback default rig is always present
     if "Yedp_Rig.glb" not in files:
         files.insert(0, "Yedp_Rig.glb")
         
     return web.json_response({"files": files})
 
 
-# --- MOCAP GLB EXPORT ROUTE ---
 @PromptServer.instance.routes.post("/action_director/upload_glb")
 async def upload_glb(request):
-    """
-    Receives a GLB Blob from the Mocap Surgeon node and saves it directly to the yedp_anims input folder.
-    Uses multipart streaming to ensure memory safety for large binary files.
-    """
     try:
         reader = await request.multipart()
         filename = "Yedp_Clean_Mocap.glb"
@@ -492,7 +496,6 @@ async def upload_glb(request):
         if file_data is None:
             return web.json_response({"status": "error", "message": "No file data received"}, status=400)
         
-        # Sanitize filename to prevent path traversal issues
         safe_name = "".join([c for c in filename if c.isalnum() or c in [' ', '_', '-']]).rstrip()
         if not safe_name.lower().endswith('.glb'):
             safe_name += ".glb"
@@ -506,7 +509,6 @@ async def upload_glb(request):
         
         file_path = os.path.join(anim_dir, safe_name)
         
-        # Context manager automatically ensures the file is closed tightly, preventing leaks
         with open(file_path, "wb") as f:
             f.write(file_data)
             
