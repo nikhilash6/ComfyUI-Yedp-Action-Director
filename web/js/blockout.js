@@ -1307,7 +1307,7 @@ class BlockoutViewport {
         btnLoad.onmouseout = () => { btnLoad.style.background = "#333"; btnLoad.style.borderColor = "#555"; };
         btnLoad.onclick = () => this.loadScene();
         const btnBake = document.createElement("button");
-        btnBake.innerText = "SEND TO GRAPH";
+        btnBake.innerText = "BAKE";
         Object.assign(btnBake.style, {
             background: "transparent", color: "#ffaa00", border: "1px solid #ffaa00", borderRadius: "3px",
             padding: "4px 8px", fontSize: "10px", cursor: "pointer", fontWeight: "bold", textTransform: "uppercase"
@@ -2009,7 +2009,7 @@ class BlockoutViewport {
         importBtn.onclick = () => fileIn.click();
 
         const exportBtn = document.createElement("button");
-        exportBtn.innerText = "Export to Graph";
+        exportBtn.innerText = "Export to AD";
         Object.assign(exportBtn.style, {
             background: "transparent", color: "#00d2ff", border: "1px solid #333", borderRadius: "4px",
             padding: "4px 12px", fontSize: "11px", fontWeight: "bold", textTransform: "uppercase",
