@@ -55,6 +55,13 @@ Instead of relying on jittery raw AI outputs, Mocap Surgeon provides a professio
 3. **SURGERY:** Use the Edit Mode, timeline Scrubber, and Onion Skin to manually correct clipping limbs, twisted shoulders, or missed steps.
 4. **BAKE:** Select your perfect range and save the `.glb` animation directly to your disk.
 
+## **🧊 Yedp Blockout**
+
+<img width="1386" height="981" alt="1209356a4063eac67acfa4f9252056e8" src="https://github.com/user-attachments/assets/b145bea1-31ba-48b5-a07e-69e93a49e495" />
+A user-friendly node meant to quickly build a 3D scene for generation, export GLB files directly to Yedp Action Director input folder.
+
+**Currently in development!**
+
 ## **🚀 What's New in V9.3 (Path Tracing, HDRI, Gaussian Splatting & Workflow Upgrades)**
 
 ### **✨ Physically Based Rendering & Lighting**
@@ -153,7 +160,13 @@ This project is open-source and available under the **MIT License**.
 
 ## **❤️ Credits**
 
-created by Yedp. Special thanks to mizumori-bit (https://github.com/mizumori-bit/) for his contribution on Orthographic/Views/Lighting implementation.
+created by Yedp. 
+
+Special thanks to mizumori-bit (https://github.com/mizumori-bit/) for his contribution on Orthographic/Views/Lighting implementation.
+
+
+Some of the 3D models used in Yedp Blockout node are CCO models generously shared by [Tim Steer](https://www.thebasemesh.com/about), feel free to give him a tip if you like his amazing work!
+
 
 Yedp-Action-Director is built upon the incredible work of the open-source community.
 
