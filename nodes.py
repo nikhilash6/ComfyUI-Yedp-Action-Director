@@ -181,21 +181,71 @@ class YedpBlockout:
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "width": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 8}),
+                "height": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 8}),
                 "info": ("STRING", {"default": "Blockout viewport. All interaction happens in the browser.", "multiline": False}),
+                "client_data": ("STRING", {"default": "", "multiline": False}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             }
         }
 
-    RETURN_TYPES = ()
-    FUNCTION = "run"
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("SHADED", "TEXTURED", "DEPTH", "NORMAL")
+    FUNCTION = "render"
     CATEGORY = "Yedp/Blockout"
     OUTPUT_NODE = True
     DESCRIPTION = "Minimal 3D viewport for blockout and scene composition."
 
-    def run(self, info="", unique_id=None):
-        return ()
+    @classmethod
+    def IS_CHANGED(cls, width, height, info, client_data=None, unique_id=None):
+        if client_data:
+            return hashlib.md5(client_data.encode()).hexdigest()
+        return float("NaN")
+
+    def decode_single_image(self, b64_str, width, height, debug_name="image"):
+        if not b64_str:
+            return torch.zeros((1, height, width, 3))
+            
+        if "," in b64_str:
+            b64_str = b64_str.split(",")[1]
+            
+        try:
+            image_data = base64.b64decode(b64_str)
+            image = Image.open(io.BytesIO(image_data)).convert("RGB")
+            
+            if image.size != (width, height):
+                image = image.resize((width, height), Image.LANCZOS)
+                
+            img_np = np.array(image).astype(np.float32) / 255.0
+            return torch.from_numpy(img_np).unsqueeze(0)
+        except Exception as e:
+            print(f"[Yedp] Blockout {debug_name} decode error: {e}")
+            return torch.zeros((1, height, width, 3))
+
+    def render(self, width, height, info="", client_data=None, unique_id=None):
+        if not client_data or len(client_data) < 10:
+            print("[Yedp] ERROR: No image data received from frontend for Blockout.")
+            red_frame = torch.zeros((1, height, width, 3))
+            red_frame[:,:,:,0] = 1.0 
+            return (red_frame, red_frame, red_frame, red_frame)
+
+        try:
+            data = json.loads(client_data)
+        except json.JSONDecodeError as e:
+            print(f"[Yedp] JSON Decode Error.")
+            red_frame = torch.zeros((1, height, width, 3))
+            red_frame[:,:,:,0] = 1.0 
+            return (red_frame, red_frame, red_frame, red_frame)
+
+        shaded = self.decode_single_image(data.get("shaded", ""), width, height, "shaded")
+        textured = self.decode_single_image(data.get("textured", ""), width, height, "textured")
+        depth = self.decode_single_image(data.get("depth", ""), width, height, "depth")
+        normal = self.decode_single_image(data.get("normal", ""), width, height, "normal")
+        
+        print(f"[Yedp] Successfully rendered Blockout outputs.")
+        return (shaded, textured, depth, normal)
 
 
 # --- API ROUTES ---
