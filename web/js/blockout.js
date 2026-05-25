@@ -2,7 +2,6 @@ import { app } from "/scripts/app.js";
 
 /**
  * YEDP BLOCKOUT — 3D Blockout Viewport with Object Management
- * Reuses THREE.js, OrbitControls, and TransformControls from Action Director's shared libs.
  */
 
 const loadThreeJS = async () => {
@@ -72,7 +71,18 @@ class BlockoutViewport {
         this.objectIdCounter = 0;
         this.selectedObjectId = null;
         
-        this.availableAssets = { vehicle: [], furniture: [], props: [], plants: [] };
+        this.availableAssets = { architecture: [], vehicle: [], furniture: [], props: [], plants: [], food: [] };
+        
+        // --- HDRI State ---
+        this.availableHdris = ["none"];
+        this.currentHdriMap = null;
+        this.hdriFile = "none";
+        this.isHdriEnabled = false;
+        this.hdriRotation = 0;
+        this.hdriIntensity = 1.0;
+        this.hdriRenderTarget = null;
+        this.hdriScene = null;
+        this.hdriCamera = null;
 
         this.gizmoBtns = {};
         this.isHovered = false;
@@ -86,15 +96,16 @@ class BlockoutViewport {
         this.transformSpace = 'world';
         this.sizeRefVisible = false;
         this.sizeRefSprite = null;
+        this.isInitialized = false;
 
         this.propInputs = {
             px: null, py: null, pz: null,
             rx: null, ry: null, rz: null,
             sx: null, sy: null, sz: null,
-            fov: null, fovSection: null,
             intensity: null, intensitySection: null,
             color: null, colorSection: null
         };
+        this.globalUI = {};
 
         this._handleKeyDown = this.handleKeyDown.bind(this);
         window.addEventListener('keydown', this._handleKeyDown);
@@ -109,8 +120,141 @@ class BlockoutViewport {
             this.availableAssets = data.assets || {};
         } catch (e) {
             console.error("[Yedp Blockout] Failed to fetch custom assets:", e);
-            this.availableAssets = { vehicle: [], furniture: [], props: [], plants: [] };
         }
+    }
+    
+    async fetchHdris() {
+        try {
+            const res = await fetch("/yedp/get_hdris");
+            const data = await res.json();
+            if (data.files && data.files.length > 0) this.availableHdris = ["none", ...data.files.filter(f => f !== "none")];
+        } catch(e) { console.error("Failed to fetch HDRIs."); }
+    }
+
+    async loadHDRI(filename) {
+        this.hdriFile = filename;
+        if (!filename || filename === "none") {
+            this.currentHdriMap = null;
+            this.updateHDRI();
+            return;
+        }
+        const url = `/view?filename=${filename}&type=input&subfolder=yedp_hdri&t=${Date.now()}`;
+        try {
+            const loader = new this.HDRLoader(); 
+            const texture = await loader.loadAsync(url);
+            texture.mapping = this.THREE.EquirectangularReflectionMapping;
+            this.currentHdriMap = texture;
+            this.updateHDRI();
+        } catch(e) { 
+            console.error("HDRI Load Error", e); 
+        }
+    }
+
+    updateHDRI() {
+        const rotDeg = parseFloat(this.hdriRotation) || 0;
+        const rotRad = this.THREE.MathUtils.degToRad(rotDeg);
+        const intensity = parseFloat(this.hdriIntensity) || 1.0;
+
+        if (this.ptRenderer && !this.ptRenderer._isYedpPatched) {
+            const originalSetScene = this.ptRenderer.setScene.bind(this.ptRenderer);
+            this.ptRenderer.setScene = (s, c) => {
+                const tEnv = s.environment; const tBg = s.background;
+                if (this.isHdriEnabled && this.currentHdriMap) {
+                    s.environment = this.currentHdriMap;
+                    s.background = this.currentHdriMap;
+                }
+                originalSetScene(s, c);
+                s.environment = tEnv; s.background = tBg;
+            };
+            this.ptRenderer._isYedpPatched = true;
+        }
+
+        if (this.isHdriEnabled && this.currentHdriMap) {
+            if (!this.hdriScene) {
+                this.hdriScene = new this.THREE.Scene();
+                const options = {
+                    generateMipmaps: true,
+                    minFilter: this.THREE.LinearMipmapLinearFilter,
+                    magFilter: this.THREE.LinearFilter,
+                    type: this.currentHdriMap.type || this.THREE.HalfFloatType,
+                    format: this.currentHdriMap.format || this.THREE.RGBAFormat
+                };
+                if (this.currentHdriMap.colorSpace) options.colorSpace = this.currentHdriMap.colorSpace;
+                this.hdriRenderTarget = new this.THREE.WebGLCubeRenderTarget(512, options);
+                this.hdriCamera = new this.THREE.CubeCamera(0.1, 100, this.hdriRenderTarget);
+                this.hdriScene.add(this.hdriCamera);
+            }
+
+            this.hdriScene.background = this.currentHdriMap;
+            this.hdriCamera.rotation.y = rotRad; 
+            this.hdriCamera.updateMatrixWorld();
+            
+            const currentRenderTarget = this.renderer.getRenderTarget();
+            this.hdriCamera.update(this.renderer, this.hdriScene);
+            this.renderer.setRenderTarget(currentRenderTarget);
+
+            this.scene.environment = this.hdriRenderTarget.texture;
+            this.scene.background = this.hdriRenderTarget.texture;
+            
+            if (!this.scene.environmentRotation) this.scene.environmentRotation = new this.THREE.Euler();
+            if (!this.scene.backgroundRotation) this.scene.backgroundRotation = new this.THREE.Euler();
+            this.scene.environmentRotation.y = rotRad;
+            this.scene.backgroundRotation.y = rotRad;
+            this.scene.environmentIntensity = intensity;
+            this.scene.backgroundIntensity = intensity;
+
+            this.sceneObjects.forEach(o => {
+                if (['cube', 'plane', 'sphere', 'cone', 'cylinder', 'pipe', 'torus', 'imported'].includes(o.type)) {
+                    o.mesh.traverse((child) => {
+                        if (child.isMesh && child.material) {
+                            const updateMat = (mat) => {
+                                if (mat.envMapIntensity !== undefined) mat.envMapIntensity = intensity;
+                                mat.needsUpdate = true;
+                            };
+                            if (Array.isArray(child.material)) child.material.forEach(updateMat);
+                            else updateMat(child.material);
+                        }
+                    });
+                }
+            });
+
+            if (this.ptRenderer) {
+                const tEnv = this.scene.environment; const tBg = this.scene.background;
+                this.scene.environment = this.currentHdriMap;
+                this.scene.background = this.currentHdriMap;
+                
+                this.ptRenderer.updateEnvironment();
+                this.needsPtReset = true;
+                
+                this.scene.environment = tEnv;
+                this.scene.background = tBg;
+            }
+        } else {
+            this.scene.environment = null;
+            this.scene.background = new this.THREE.Color(0x1a1a1a);
+
+            if (this.ptRenderer) {
+                this.ptRenderer.updateEnvironment();
+                this.needsPtReset = true;
+            }
+
+            this.sceneObjects.forEach(o => {
+                if (['cube', 'plane', 'sphere', 'cone', 'cylinder', 'pipe', 'torus', 'imported'].includes(o.type)) {
+                    o.mesh.traverse((child) => {
+                        if (child.isMesh && child.material) {
+                            const resetMat = (mat) => {
+                                if (mat.envMapIntensity !== undefined) mat.envMapIntensity = 1.0;
+                                mat.needsUpdate = true;
+                            };
+                            if (Array.isArray(child.material)) child.material.forEach(resetMat);
+                            else resetMat(child.material);
+                        }
+                    });
+                }
+            });
+        }
+        
+        this.updateDisplayMode();
     }
 
     async init() {
@@ -119,9 +263,11 @@ class BlockoutViewport {
             this.THREE = libs.THREE;
             this.GLTFLoader = libs.GLTFLoader;
             this.FBXLoader = libs.FBXLoader;
+            this.HDRLoader = libs.HDRLoader;
             this.GLTFExporter = libs.GLTFExporter || libs.GLTFExporter?.GLTFExporter || libs.GLTFExporter?.default?.GLTFExporter;
 
             await this.fetchBlockoutAssets();
+            await this.fetchHdris();
 
             // --- DOM LAYOUT ---
             this.container.innerHTML = "";
@@ -168,7 +314,7 @@ class BlockoutViewport {
             const bottomPanelDiv = document.createElement("div");
             bottomPanelDiv.className = "blockout-creation-panel";
             Object.assign(bottomPanelDiv.style, {
-                height: "320px", flex: "0 0 300px", background: "#1a1a1a",
+                height: "180px", flex: "0 0 180px", background: "#1a1a1a",
                 borderTop: "1px solid #333", display: "flex", flexDirection: "column",
                 zIndex: "10"
             });
@@ -224,8 +370,27 @@ class BlockoutViewport {
             this.renderer = new this.THREE.WebGLRenderer({ antialias: true, alpha: false });
             if (this.renderer.outputColorSpace) this.renderer.outputColorSpace = this.THREE.SRGBColorSpace;
             else this.renderer.outputEncoding = this.THREE.sRGBEncoding;
+            
+            // PATH TRACING STATE
+            this.isPathTracingEnabled = false;
+            this.ptRenderer = null;
+            this.ptPreviewSamples = 32;
+            this.needsPtReset = true;
+            this.needsPtBvhUpdate = true;
+
             this.renderer.shadowMap.enabled = true;
             this.renderer.shadowMap.type = this.THREE.PCFSoftShadowMap;
+            
+            // INIT PATH TRACER
+            if (libs.ptLib && libs.ptLib.WebGLPathTracer) {
+                this.ptRenderer = new libs.ptLib.WebGLPathTracer(this.renderer);
+                this.ptRenderer.bounces = 3;
+                this.ptRenderer.renderScale = 1;
+                this.ptRenderer.rasterizeScene = false;
+                this.ptRenderer.fadeDuration = 0;
+                this.ptRenderer.filterGlossyFactor = 0.5;
+            }
+
             viewportDiv.appendChild(this.renderer.domElement);
             Object.assign(this.renderer.domElement.style, { width: "100%", height: "100%", display: "block" });
 
@@ -233,15 +398,32 @@ class BlockoutViewport {
             this.controls.target.set(0, 0.5, 0);
             this.controls.enableDamping = true;
             this.controls.dampingFactor = 0.1;
-            this.controls.addEventListener('change', () => this.syncPropertiesPanel());
+            
+            // NEW: Debounce logic to drop to WebGL while orbiting
+            this.isMoving = false;
+            let moveTimeout;
+            this.controls.addEventListener('change', () => {
+                this.isMoving = true;
+                clearTimeout(moveTimeout);
+                moveTimeout = setTimeout(() => { this.isMoving = false; this.needsPtReset = true; }, 150);
+                this.syncPropertiesPanel();
+            });
 
             this.transformControls = new libs.TransformControls(this.camera, this.renderer.domElement);
             this.transformControls.addEventListener('dragging-changed', (event) => {
                 this.controls.enabled = !event.value;
+                this.isMoving = event.value; // Drop to WebGL while using Gizmo
+                if (!event.value) this.needsPtReset = true;
             });
             this.transformControls.addEventListener('change', () => {
+                this.needsPtReset = true;
                 this.syncPropertiesPanel();
             });
+            this.transformControls.addEventListener('objectChange', () => {
+                this.needsPtBvhUpdate = true;
+                this.needsPtReset = true;
+            });
+            
             this.scene.add(this.transformControls);
 
             const ambient = new this.THREE.AmbientLight(0xffffff, 0.6);
@@ -309,6 +491,11 @@ class BlockoutViewport {
             this.animate();
             console.log("[Yedp Blockout] Viewport initialized successfully.");
 
+        if (this.node && this.node.saved_scene_state) {
+                this.restoreWorkflowState(this.node.saved_scene_state);
+            }
+            this.isInitialized = true;
+
         } catch (e) {
             this.container.innerHTML = `<div style="color:red; padding:20px;">[Yedp Blockout] Init Error: ${e.message}</div>`;
             console.error("[Yedp Blockout] Init Error:", e);
@@ -316,23 +503,267 @@ class BlockoutViewport {
     }
 
     // =========================================================================
+    // WORKFLOW STATE SERIALIZATION
+    // =========================================================================
+    
+    serializeWorkflowState() {
+        if (!this.camera || !this.controls) return null;
+        
+        return JSON.stringify({
+            version: 1,
+            camera: {
+                pos: this.camera.position.toArray(),
+                rot: this.camera.rotation.toArray(),
+                target: this.controls.target.toArray(),
+                fov: this.perspCam.fov,
+                isOrtho: this.isOrthographic
+            },
+            settings: {
+                displayMode: this.displayMode,
+                showWireframe: this.showWireframe,
+                isDepthMode: this.isDepthMode,
+                depthNear: this.depthNear,
+                depthFar: this.depthFar,
+                isPathTracingEnabled: this.isPathTracingEnabled,
+                ptPreviewSamples: this.ptPreviewSamples,
+                hdriFile: this.hdriFile,
+                isHdriEnabled: this.isHdriEnabled,
+                hdriRotation: this.hdriRotation,
+                hdriIntensity: this.hdriIntensity
+            },
+            objects: this.sceneObjects.filter(o => !o.isFixed).map(o => {
+                let colorHex = 0xffffff;
+                let intensity = 0; let distance = 0; let angle = 0; let penumbra = 0;
+
+                const isLight = ['pointlight', 'directionallight', 'spotlight'].includes(o.type);
+                if (isLight) {
+                    const l = o.mesh.children.find(c => c.isLight);
+                    if (l) {
+                        colorHex = l.color.getHex(); intensity = l.intensity;
+                        distance = l.distance || 0; angle = l.angle || 0; penumbra = l.penumbra || 0;
+                    }
+                } else {
+                    let mat = null;
+                    if (o.mesh.material) mat = Array.isArray(o.mesh.material) ? o.mesh.material[0] : o.mesh.material;
+                    else {
+                        o.mesh.traverse(c => {
+                            if (!mat && c.isMesh && c.material && !c.userData.isWireframeOverlay) {
+                                mat = Array.isArray(c.material) ? c.material[0] : c.material;
+                            }
+                        });
+                    }
+                    if (mat && mat.color) colorHex = mat.color.getHex();
+                }
+
+                return {
+                    id: o.id, type: o.type, name: o.name,
+                    pos: o.mesh.position.toArray(), rot: o.mesh.rotation.toArray(), scl: o.mesh.scale.toArray(),
+                    color: colorHex, intensity, distance, angle, penumbra,
+                    assetCategory: o.mesh.userData.assetCategory || null, 
+                    assetFilename: o.mesh.userData.assetFilename || null
+                };
+            })
+        });
+    }
+
+    restoreWorkflowState(stateStr) {
+        if (!stateStr) return;
+        try {
+            const state = JSON.parse(stateStr);
+            
+            if (state.camera) {
+                this.isOrthographic = state.camera.isOrtho;
+                if (this.propInputs.ortho) this.propInputs.ortho.checked = this.isOrthographic;
+                this.perspCam.fov = state.camera.fov || 45; this.perspCam.updateProjectionMatrix();
+                this.camera = this.isOrthographic ? this.orthoCam : this.perspCam;
+                this.camera.position.fromArray(state.camera.pos);
+                this.camera.rotation.fromArray(state.camera.rot);
+                if (state.camera.target) this.controls.target.fromArray(state.camera.target);
+                this.controls.object = this.camera; this.transformControls.camera = this.camera;
+                this.controls.update();
+            }
+
+            if (state.settings) {
+                this.displayMode = state.settings.displayMode || 'shaded';
+                this.showWireframe = state.settings.showWireframe || false;
+                this.isDepthMode = state.settings.isDepthMode || false;
+                this.depthNear = state.settings.depthNear || 0.1;
+                this.depthFar = state.settings.depthFar || 10.0;
+                
+                this.isPathTracingEnabled = state.settings.isPathTracingEnabled || false;
+                this.ptPreviewSamples = state.settings.ptPreviewSamples || 32;
+                
+                this.hdriFile = state.settings.hdriFile || "none";
+                this.isHdriEnabled = state.settings.isHdriEnabled || false;
+                this.hdriRotation = state.settings.hdriRotation || 0;
+                this.hdriIntensity = state.settings.hdriIntensity !== undefined ? state.settings.hdriIntensity : 1.0;
+
+                if (this.propInputs.depthCheck) this.propInputs.depthCheck.checked = this.isDepthMode;
+                if (this.propInputs.depthNear) this.propInputs.depthNear.value = this.depthNear;
+                if (this.propInputs.depthFar) this.propInputs.depthFar.value = this.depthFar;
+                
+                if (this.globalUI.chkPt) this.globalUI.chkPt.checked = this.isPathTracingEnabled;
+                if (this.globalUI.sldSamp) this.globalUI.sldSamp.value = this.ptPreviewSamples;
+                if (this.globalUI.inpSamp) this.globalUI.inpSamp.value = this.ptPreviewSamples;
+                
+                if (this.globalUI.selHdri) this.globalUI.selHdri.value = this.hdriFile;
+                if (this.globalUI.chkHdriEn) this.globalUI.chkHdriEn.checked = this.isHdriEnabled;
+                if (this.globalUI.sldRot) this.globalUI.sldRot.value = this.hdriRotation;
+                if (this.globalUI.inpRot) this.globalUI.inpRot.value = this.hdriRotation;
+                if (this.globalUI.inpInt) this.globalUI.inpInt.value = this.hdriIntensity;
+                
+                if (this.hdriFile !== "none") this.loadHDRI(this.hdriFile);
+            }
+
+            this.selectObjectById(null);
+            const toDelete = this.sceneObjects.filter(o => !o.isFixed).map(o => o.id);
+            toDelete.forEach(id => this.deleteObject(id));
+
+            if (state.objects) {
+                state.objects.forEach(o => {
+                    if (['cube', 'plane', 'sphere', 'cone', 'cylinder', 'pipe', 'torus', 'pointlight', 'directionallight', 'spotlight'].includes(o.type)) {
+                        const entry = this.addObject(o.type, null, null, false);
+                        entry.name = o.name; entry.mesh.position.fromArray(o.pos);
+                        entry.mesh.rotation.fromArray(o.rot); entry.mesh.scale.fromArray(o.scl);
+
+                        if (['pointlight', 'directionallight', 'spotlight'].includes(o.type)) {
+                            const l = entry.mesh.children.find(c => c.isLight);
+                            if (l) {
+                                l.color.setHex(o.color); l.intensity = o.intensity;
+                                if (o.distance !== undefined) l.distance = o.distance;
+                                if (o.angle !== undefined) l.angle = o.angle;
+                                if (o.penumbra !== undefined) l.penumbra = o.penumbra;
+                                entry.mesh.traverse(c => {
+                                    if (c.userData.isHelper && c.material) {
+                                        c.material.color.setHex(o.color);
+                                    }
+                                });
+                            }
+                        } else {
+                            if (entry.mesh.material) entry.mesh.material.color.setHex(o.color);
+                        }
+                    } else if (o.type === 'imported' && o.assetCategory && o.assetFilename) {
+                        const baseUrl = new URL(".", import.meta.url).href;
+                        let url = "";
+                        if (o.assetCategory === 'yedp_envs') {
+                            url = `/view?filename=${encodeURIComponent(o.assetFilename)}&type=input&subfolder=yedp_envs&t=${Date.now()}`;
+                        } else {
+                            url = new URL(`../blockout/${o.assetCategory}/${o.assetFilename}`, baseUrl).href;
+                        }
+                        
+                        const ext = o.assetFilename.split('.').pop().toLowerCase();
+                        
+                        const applyTransforms = (mesh) => {
+                            const entry = this.addObject("imported", mesh, o.assetFilename, false);
+                            entry.name = o.name; entry.mesh.userData.assetCategory = o.assetCategory; entry.mesh.userData.assetFilename = o.assetFilename;
+                            entry.mesh.position.fromArray(o.pos); entry.mesh.rotation.fromArray(o.rot); entry.mesh.scale.fromArray(o.scl);
+                            
+                            if (o.color !== undefined) {
+                                entry.mesh.traverse(c => {
+                                    if (c.isMesh) {
+                                        if (c.material && c.material.color) c.material.color.setHex(o.color);
+                                        if (c.userData.originalMaterial && c.userData.originalMaterial.color) c.userData.originalMaterial.color.setHex(o.color);
+                                        if (c.userData.clayMat && c.userData.clayMat.color) c.userData.clayMat.color.setHex(o.color);
+                                    }
+                                });
+                            }
+
+                            this.needsPtReset = true; this.needsPtBvhUpdate = true;
+                        };
+
+                        if (ext === 'fbx') new this.FBXLoader().load(url, (fbx) => applyTransforms(fbx));
+                        else new this.GLTFLoader().load(url, (gltf) => applyTransforms(gltf.scene));
+                    }
+                });
+            }
+
+            this.updateDisplayMode();
+            if (this.updateToolbarUI) this.updateToolbarUI();
+            this.needsPtReset = true; this.needsPtBvhUpdate = true;
+        } catch (e) { console.error("Failed to restore workflow state:", e); }
+    }
+
+    // =========================================================================
     // OBJECT MANAGEMENT
     // =========================================================================
 
-    loadCategoryAsset(category, filename) {
-        const baseUrl = new URL(".", import.meta.url).href;
-        const url = new URL(`../blockout/${category}/${filename}`, baseUrl).href;
+    async uploadCustomAsset(file, subfolder) {
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("subfolder", subfolder);
+        
+        try {
+            const res = await fetch("/yedp/upload_asset", { method: "POST", body: formData });
+            const data = await res.json();
+            return data.filename; 
+        } catch (e) {
+            console.error("Upload failed:", e);
+            alert("Upload failed! Ensure the Python backend has /yedp/upload_asset configured.");
+            return null;
+        }
+    }
+
+    createUploadButton(tooltip, accept, subfolder, onUploaded) {
+        const wrap = document.createElement("div");
+        wrap.style.display = "flex";
+        
+        const btn = document.createElement("button");
+        btn.innerText = "📁";
+        btn.title = tooltip;
+        Object.assign(btn.style, { 
+            background: "#222", color: "#fff", border: "1px solid #444", 
+            borderRadius: "3px", cursor: "pointer", fontSize: "10px", 
+            padding: "2px 4px", marginLeft: "4px", flex: "none" 
+        });
+        
+        const fileIn = document.createElement("input");
+        fileIn.type = "file"; 
+        fileIn.accept = accept; 
+        fileIn.style.display = "none";
+        
+        btn.onclick = (e) => { e.stopPropagation(); fileIn.click(); };
+        fileIn.onchange = async (e) => {
+            const f = e.target.files[0];
+            if (!f) return;
+            const origText = btn.innerText;
+            btn.innerText = "⏳";
+            btn.style.background = "#552"; 
+            
+            const filename = await this.uploadCustomAsset(f, subfolder);
+            
+            btn.innerText = origText;
+            btn.style.background = "#222";
+            if (filename) onUploaded(filename);
+            fileIn.value = ""; 
+        };
+        
+        wrap.append(btn, fileIn);
+        return wrap;
+    }
+
+    loadCategoryAsset(category, filename, isEnvUpload = false) {
+        let url;
+        if (isEnvUpload || category === 'yedp_envs') {
+            url = `/view?filename=${encodeURIComponent(filename)}&type=input&subfolder=yedp_envs&t=${Date.now()}`;
+        } else {
+            const baseUrl = new URL(".", import.meta.url).href;
+            url = new URL(`../blockout/${category}/${filename}`, baseUrl).href;
+        }
         
         const ext = filename.split('.').pop().toLowerCase();
         if (ext === 'fbx') {
             const loader = new this.FBXLoader();
             loader.load(url, (fbx) => {
-                this.addObject("imported", fbx, filename);
+                const entry = this.addObject("imported", fbx, filename);
+                entry.mesh.userData.assetCategory = isEnvUpload ? 'yedp_envs' : category;
+                entry.mesh.userData.assetFilename = filename;
             });
         } else {
             const loader = new this.GLTFLoader();
             loader.load(url, (gltf) => {
-                this.addObject("imported", gltf.scene, filename);
+                const entry = this.addObject("imported", gltf.scene, filename);
+                entry.mesh.userData.assetCategory = isEnvUpload ? 'yedp_envs' : category;
+                entry.mesh.userData.assetFilename = filename;
             });
         }
     }
@@ -416,22 +847,41 @@ class BlockoutViewport {
             light.castShadow = true;
             light.shadow.bias = -0.001;
 
-            const sphereGeo = new this.THREE.SphereGeometry(0.2, 8, 8);
-            const sphereMat = new this.THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true });
-            mesh = new this.THREE.Mesh(sphereGeo, sphereMat);
+            mesh = new this.THREE.Group();
             mesh.add(light);
+
+            const sphereGeo = new this.THREE.SphereGeometry(0.2, 16, 16);
+            const sphereMat = new this.THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true });
+            const gizmo = new this.THREE.Mesh(sphereGeo, sphereMat);
+            gizmo.userData.isHelper = true;
+            mesh.add(gizmo);
         } else if (type === "directionallight") {
             const light = new this.THREE.DirectionalLight(0xffffff, 1.2);
             light.castShadow = true;
             light.shadow.bias = -0.001;
             light.shadow.mapSize.set(1024, 1024);
 
-            const coneGeo = new this.THREE.ConeGeometry(0.2, 0.4, 8);
-            const coneMat = new this.THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true });
-            mesh = new this.THREE.Mesh(coneGeo, coneMat);
-            mesh.rotation.x = -Math.PI / 2;
+            mesh = new this.THREE.Group();
             mesh.add(light);
-            
+
+            const gizmo = new this.THREE.Group();
+            const gizmoMat = new this.THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true });
+
+            const shaftGeo = new this.THREE.CylinderGeometry(0.02, 0.02, 0.5, 8);
+            const shaft = new this.THREE.Mesh(shaftGeo, gizmoMat);
+            shaft.position.z = -0.25;
+            shaft.rotation.x = Math.PI / 2;
+
+            const headGeo = new this.THREE.ConeGeometry(0.1, 0.2, 8);
+            const head = new this.THREE.Mesh(headGeo, gizmoMat);
+            head.position.z = -0.5;
+            head.rotation.x = -Math.PI / 2;
+
+            gizmo.add(shaft);
+            gizmo.add(head);
+            gizmo.userData.isHelper = true;
+            mesh.add(gizmo);
+
             const target = new this.THREE.Object3D();
             target.position.set(0, 0, -1);
             mesh.add(target);
@@ -445,12 +895,17 @@ class BlockoutViewport {
             light.shadow.bias = -0.001;
             light.shadow.mapSize.set(1024, 1024);
 
+            mesh = new this.THREE.Group();
+            mesh.add(light);
+
             const cylGeo = new this.THREE.CylinderGeometry(0.05, 0.2, 0.4, 8);
             const cylMat = new this.THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true });
-            mesh = new this.THREE.Mesh(cylGeo, cylMat);
-            mesh.rotation.x = -Math.PI / 2;
-            mesh.add(light);
-            
+            const gizmo = new this.THREE.Mesh(cylGeo, cylMat);
+            gizmo.rotation.x = Math.PI / 2;
+            gizmo.position.z = -0.2;
+            gizmo.userData.isHelper = true;
+            mesh.add(gizmo);
+
             const target = new this.THREE.Object3D();
             target.position.set(0, 0, -1);
             mesh.add(target);
@@ -705,10 +1160,15 @@ class BlockoutViewport {
     }
 
     // =========================================================================
-    // PROPERTIES PANEL (RIGHT SIDEBAR)
+    // PROPERTIES & GLOBAL SETTINGS PANEL
     // =========================================================================
 
     buildPropertiesPanel(panelDiv) {
+        
+        // --- TOP HALF: OBJECT PROPERTIES ---
+        const propsWrapper = document.createElement("div");
+        Object.assign(propsWrapper.style, { flex: "1 1 0", display: "flex", flexDirection: "column", overflow: "hidden" });
+        
         const header = document.createElement("div");
         Object.assign(header.style, {
             padding: "8px 12px", background: "#222", borderBottom: "1px solid #333",
@@ -716,14 +1176,14 @@ class BlockoutViewport {
             letterSpacing: "1px"
         });
         header.innerText = "Properties";
-        panelDiv.appendChild(header);
+        propsWrapper.appendChild(header);
 
         this.propsContentEl = document.createElement("div");
         Object.assign(this.propsContentEl.style, {
             flex: "1 1 0", overflowY: "auto", display: "flex", flexDirection: "column",
             padding: "12px", gap: "12px", fontSize: "12px", fontFamily: "'Consolas', 'Monaco', monospace"
         });
-        panelDiv.appendChild(this.propsContentEl);
+        propsWrapper.appendChild(this.propsContentEl);
 
         this.propsEmptyMsg = document.createElement("div");
         Object.assign(this.propsEmptyMsg.style, {
@@ -738,6 +1198,7 @@ class BlockoutViewport {
         });
         this.propsContentEl.appendChild(this.propsForm);
 
+        // --- Basic Transforms ---
         const spaceSection = document.createElement("div");
         Object.assign(spaceSection.style, { display: "flex", gap: "8px", flexWrap: "wrap" });
 
@@ -858,6 +1319,78 @@ class BlockoutViewport {
         createVec3Input("Rotation (Deg)", "r", 1);
         createVec3Input("Scale", "s", 0.1);
         
+        // --- CUSTOM CAMERA SECTION WITH FOV / MM ---
+        const camSection = document.createElement("div");
+        camSection.style.display = "none";
+        camSection.style.flexDirection = "column";
+        camSection.style.gap = "8px";
+
+        const orthoWrap = document.createElement("div");
+        orthoWrap.style.display = "flex"; orthoWrap.style.alignItems = "center"; orthoWrap.style.gap = "4px";
+        const orthoChk = document.createElement("input"); orthoChk.type = "checkbox";
+        orthoChk.onchange = () => this.applyPropertiesFromUI();
+        const orthoLbl = document.createElement("label"); orthoLbl.style.fontSize = "10px"; orthoLbl.style.color = "#888"; orthoLbl.append(orthoChk, " Orthographic");
+        orthoWrap.appendChild(orthoLbl);
+
+        const fovWrap = document.createElement("div");
+        fovWrap.style.display = "flex"; fovWrap.style.alignItems = "center"; fovWrap.style.gap = "4px";
+        const fovLbl = document.createElement("span"); fovLbl.innerText = "FOV"; fovLbl.style.fontSize = "10px"; fovLbl.style.color = "#888"; fovLbl.style.width = "25px";
+        
+        const fovSld = document.createElement("input"); fovSld.type = "range"; fovSld.min = "10"; fovSld.max = "150"; fovSld.step = "1"; fovSld.style.flex = "1"; fovSld.style.width = "0";
+        const fovVal = document.createElement("input"); fovVal.type = "number"; fovVal.style.width = "35px"; fovVal.style.background = "#111"; fovVal.style.color = "#00d2ff"; fovVal.style.border = "1px solid #444"; fovVal.style.fontSize = "9px"; fovVal.style.padding = "2px"; fovVal.style.textAlign = "right";
+        const fovDeg = document.createElement("span"); fovDeg.innerText = "°"; fovDeg.style.fontSize = "10px"; fovDeg.style.color = "#888";
+        
+        const fovMm = document.createElement("input"); fovMm.type = "number"; fovMm.style.width = "35px"; fovMm.style.background = "#111"; fovMm.style.color = "#4ade80"; fovMm.style.border = "1px solid #444"; fovMm.style.fontSize = "9px"; fovMm.style.padding = "2px"; fovMm.style.textAlign = "right";
+        const mmLbl = document.createElement("span"); mmLbl.innerText = "mm"; mmLbl.style.fontSize = "10px"; mmLbl.style.color = "#888";
+
+        const syncFov = (val, isMm = false) => {
+            let fovDegV = 45;
+            if (isMm) {
+                const mm = Math.max(1, parseFloat(val) || 35);
+                this.perspCam.setFocalLength(mm);
+                fovDegV = this.perspCam.fov;
+            } else {
+                fovDegV = Math.max(10, Math.min(150, parseFloat(val) || 45));
+                this.perspCam.fov = fovDegV;
+            }
+            this.perspCam.updateProjectionMatrix();
+            fovSld.value = fovDegV; fovVal.value = Math.round(fovDegV * 10) / 10; fovMm.value = Math.round(this.perspCam.getFocalLength());
+            this.needsPtReset = true;
+            if (this.isOrthographic) this.applyPropertiesFromUI();
+        };
+
+        fovSld.oninput = (e) => syncFov(e.target.value);
+        fovVal.onchange = (e) => syncFov(e.target.value);
+        fovMm.onchange = (e) => syncFov(e.target.value, true);
+        
+        fovWrap.append(fovLbl, fovSld, fovVal, fovDeg, fovMm, mmLbl);
+
+        const clipWrap = document.createElement("div");
+        clipWrap.style.display = "flex"; clipWrap.style.alignItems = "center"; clipWrap.style.gap = "4px";
+        const clipLbl = document.createElement("span"); clipLbl.innerText = "Clip"; clipLbl.style.fontSize = "10px"; clipLbl.style.color = "#888"; clipLbl.style.width = "25px";
+        const nearLbl = document.createElement("span"); nearLbl.innerText = "N:"; nearLbl.style.fontSize = "9px"; nearLbl.style.color = "#666";
+        const nearInp = document.createElement("input"); nearInp.type = "number"; nearInp.step = "0.1"; Object.assign(nearInp.style, { flex: "1", width: "0", background: "#111", color: "#fff", border: "1px solid #444", fontSize: "9px", padding: "2px" });
+        const farLbl = document.createElement("span"); farLbl.innerText = "F:"; farLbl.style.fontSize = "9px"; farLbl.style.color = "#666";
+        const farInp = document.createElement("input"); farInp.type = "number"; farInp.step = "10"; Object.assign(farInp.style, { flex: "1", width: "0", background: "#111", color: "#fff", border: "1px solid #444", fontSize: "9px", padding: "2px" });
+        
+        nearInp.onchange = () => this.applyPropertiesFromUI();
+        farInp.onchange = () => this.applyPropertiesFromUI();
+
+        clipWrap.append(clipLbl, nearLbl, nearInp, farLbl, farInp);
+
+        camSection.append(orthoWrap, fovWrap, clipWrap);
+        this.propsForm.appendChild(camSection);
+
+        this.propInputs.camSection = camSection;
+        this.propInputs.ortho = orthoChk;
+        this.propInputs.fovSld = fovSld;
+        this.propInputs.fovVal = fovVal;
+        this.propInputs.fovMm = fovMm;
+        this.propInputs.clipNear = nearInp;
+        this.propInputs.clipFar = farInp;
+
+
+        // --- Generic Light / Mesh settings ---
         const createScalarInput = (label, keyPrefix, step) => {
             const section = document.createElement("div");
             const lbl = document.createElement("div");
@@ -883,64 +1416,6 @@ class BlockoutViewport {
             this.propsForm.appendChild(section);
             
             this.propInputs[keyPrefix] = inp;
-            this.propInputs[keyPrefix + 'Section'] = section;
-        };
-
-        const createToggleInput = (label, keyPrefix) => {
-            const section = document.createElement("div");
-            const wrap = document.createElement("div");
-            Object.assign(wrap.style, { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" });
-
-            const lbl = document.createElement("div");
-            lbl.innerText = label;
-            Object.assign(lbl.style, { color: "#888", fontSize: "10px", textTransform: "uppercase", marginRight: "10px" });
-
-            const inp = document.createElement("input");
-            inp.type = "checkbox";
-            inp.style.cursor = "pointer";
-            inp.addEventListener('change', () => this.applyPropertiesFromUI());
-
-            wrap.appendChild(lbl);
-            wrap.appendChild(inp);
-            section.appendChild(wrap);
-            this.propsForm.appendChild(section);
-
-            this.propInputs[keyPrefix] = inp;
-            this.propInputs[keyPrefix + 'Section'] = section;
-        };
-
-        const createSliderInput = (label, keyPrefix, min, max, step) => {
-            const section = document.createElement("div");
-            const lbl = document.createElement("div");
-            lbl.innerText = label;
-            Object.assign(lbl.style, { color: "#888", marginBottom: "4px", fontSize: "10px", textTransform: "uppercase" });
-            section.appendChild(lbl);
-
-            const wrap = document.createElement("div");
-            Object.assign(wrap.style, { display: "flex", alignItems: "center", gap: "8px", background: "#222", padding: "4px", borderRadius: "3px", border: "1px solid #444" });
-
-            const slider = document.createElement("input");
-            slider.type = "range";
-            slider.min = min; slider.max = max; slider.step = step;
-            slider.style.flex = "1";
-            slider.addEventListener('input', () => { num.value = slider.value; this.applyPropertiesFromUI(); });
-
-            const num = document.createElement("input");
-            num.type = "number";
-            num.min = min; num.max = max; num.step = step;
-            Object.assign(num.style, {
-                width: "40px", background: "transparent", border: "none", color: "#ccc",
-                padding: "0", fontSize: "11px", outline: "none", fontFamily: "inherit"
-            });
-            num.addEventListener('input', () => { slider.value = num.value; this.applyPropertiesFromUI(); });
-
-            wrap.appendChild(slider);
-            wrap.appendChild(num);
-            section.appendChild(wrap);
-            this.propsForm.appendChild(section);
-
-            this.propInputs[keyPrefix] = slider; 
-            this.propInputs[keyPrefix + 'Num'] = num;
             this.propInputs[keyPrefix + 'Section'] = section;
         };
 
@@ -970,16 +1445,108 @@ class BlockoutViewport {
             this.propInputs[keyPrefix + 'Section'] = section;
         };
 
-        createToggleInput("Orthographic", "ortho");
-        createSliderInput("FOV", "fov", 10, 150, 1);
-        createScalarInput("Clip Near", "clipNear", 0.01);
-        createScalarInput("Clip Far", "clipFar", 1);
         createScalarInput("Intensity", "intensity", 0.1);
         createScalarInput("Distance", "distance", 1);
         createScalarInput("Angle", "angle", 1);
         createScalarInput("Penumbra", "penumbra", 0.1);
         createColorInput("Color", "color");
         
+        panelDiv.appendChild(propsWrapper);
+
+        // --- BOTTOM HALF: GLOBAL SETTINGS ---
+        const globalWrapper = document.createElement("div");
+        Object.assign(globalWrapper.style, { flex: "0 0 auto", display: "flex", flexDirection: "column", borderTop: "2px solid #333", background: "#151515" });
+        
+        const globalHeader = document.createElement("div");
+        Object.assign(globalHeader.style, {
+            padding: "8px 12px", background: "#222", borderBottom: "1px solid #333",
+            color: "#ccc", fontSize: "12px", fontWeight: "bold", textTransform: "uppercase", letterSpacing: "1px"
+        });
+        globalHeader.innerText = "Global Settings";
+        globalWrapper.appendChild(globalHeader);
+
+        const globalContent = document.createElement("div");
+        Object.assign(globalContent.style, { padding: "12px", display: "flex", flexDirection: "column", gap: "12px" });
+
+        // HDRI BLOCK
+        const hdriBlock = document.createElement("div");
+        Object.assign(hdriBlock.style, { background: "#1e1e1e", border: "1px solid #333", borderRadius: "4px", padding: "8px", display: "flex", flexDirection: "column", gap: "6px" });
+        hdriBlock.innerHTML = `<div style="color:#00d2ff; font-weight:bold; font-size:10px; text-transform:uppercase;">HDRI Lighting</div>`;
+        
+        const hdriRow1 = document.createElement("div");
+        hdriRow1.style.display = "flex"; hdriRow1.style.alignItems = "center";
+        
+        const selHdri = document.createElement("select");
+        Object.assign(selHdri.style, { flex: "1", width: "0", background: "#111", color: "#fff", border: "1px solid #444", borderRadius: "3px", fontSize: "10px", padding: "2px" });
+        this.availableHdris.forEach(h => selHdri.add(new Option(h, h)));
+        selHdri.onchange = (e) => this.loadHDRI(e.target.value);
+        
+        const uploadHdriBtn = this.createUploadButton("Upload HDRI", ".hdr,.exr", "yedp_hdri", async (filename) => {
+            if (!this.availableHdris.includes(filename)) this.availableHdris.push(filename);
+            selHdri.add(new Option(filename, filename));
+            selHdri.value = filename;
+            await this.loadHDRI(filename);
+        });
+        hdriRow1.append(selHdri, uploadHdriBtn);
+
+        const hdriRow2 = document.createElement("div");
+        hdriRow2.style.display = "flex"; hdriRow2.style.gap = "8px"; hdriRow2.style.alignItems = "center";
+        const chkHdriEn = document.createElement("input"); chkHdriEn.type = "checkbox"; chkHdriEn.checked = this.isHdriEnabled;
+        chkHdriEn.onchange = (e) => { this.isHdriEnabled = e.target.checked; this.updateHDRI(); };
+        const lblHdriEn = document.createElement("label"); Object.assign(lblHdriEn.style, { cursor: "pointer", display: "flex", gap: "4px", color: "#ccc", fontSize: "9px", alignItems: "center" });
+        lblHdriEn.append(chkHdriEn, "Enable IBL");
+        hdriRow2.append(lblHdriEn);
+
+        const hdriRow3 = document.createElement("div");
+        hdriRow3.style.display = "flex"; hdriRow3.style.gap = "4px"; hdriRow3.style.alignItems = "center";
+        
+        const lblRot = document.createElement("span"); lblRot.innerText = "Rot"; lblRot.style.fontSize="9px"; lblRot.style.color="#888";
+        const sldRot = document.createElement("input"); sldRot.type = "range"; sldRot.min = "0"; sldRot.max = "360"; sldRot.value = this.hdriRotation; Object.assign(sldRot.style, {flex: "1", width: "0"});
+        const inpRot = document.createElement("input"); inpRot.type = "number"; inpRot.step = "1"; inpRot.value = this.hdriRotation; Object.assign(inpRot.style, { width:"36px", background:"#111", color:"#00d2ff", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right" });
+        const syncRot = (v) => { this.hdriRotation = v; sldRot.value = v; inpRot.value = v; this.updateHDRI(); };
+        sldRot.oninput = (e) => syncRot(e.target.value);
+        inpRot.onchange = (e) => syncRot(parseFloat(e.target.value) || 0);
+
+        const lblInt = document.createElement("span"); lblInt.innerText = "Int"; lblInt.style.fontSize="9px"; lblInt.style.color="#888";
+        const inpInt = document.createElement("input"); inpInt.type = "number"; inpInt.step = "0.1"; inpInt.value = this.hdriIntensity; Object.assign(inpInt.style, { width:"36px", background:"#111", color:"#00d2ff", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right" });
+        inpInt.onchange = (e) => { this.hdriIntensity = parseFloat(e.target.value) || 1.0; this.updateHDRI(); };
+        
+        hdriRow3.append(lblRot, sldRot, inpRot, lblInt, inpInt);
+        hdriBlock.append(hdriRow1, hdriRow2, hdriRow3);
+
+        // PATH TRACING BLOCK
+        const ptBlock = document.createElement("div");
+        Object.assign(ptBlock.style, { background: "#1e1e1e", border: "1px solid #333", borderRadius: "4px", padding: "8px", display: "flex", flexDirection: "column", gap: "6px" });
+        
+        const ptTop = document.createElement("div"); ptTop.style.display = "flex"; ptTop.style.justifyContent = "space-between";
+        ptTop.innerHTML = `<div style="color:#ffaa00; font-weight:bold; font-size:10px; text-transform:uppercase;">Path Tracing</div>`;
+        const ptCounter = document.createElement("div"); ptCounter.id = "pt-sample-counter"; ptCounter.innerText = "0 / 32"; Object.assign(ptCounter.style, { fontSize: "9px", color: "#888", fontFamily: "monospace" });
+        ptTop.appendChild(ptCounter);
+
+        const ptRow1 = document.createElement("div"); ptRow1.style.display = "flex"; ptRow1.style.alignItems = "center";
+        const chkPt = document.createElement("input"); chkPt.type = "checkbox"; chkPt.checked = this.isPathTracingEnabled;
+        chkPt.onchange = (e) => { this.isPathTracingEnabled = e.target.checked; this.needsPtReset = true; this.updateDisplayMode(); };
+        const lblPt = document.createElement("label"); Object.assign(lblPt.style, { cursor: "pointer", display: "flex", gap: "4px", color: "#ccc", fontSize: "9px", alignItems: "center" });
+        lblPt.append(chkPt, "Enable (Shaded/Tex)");
+        ptRow1.append(lblPt);
+
+        const ptRow2 = document.createElement("div"); ptRow2.style.display = "flex"; ptRow2.style.gap = "4px"; ptRow2.style.alignItems = "center";
+        const lblSamp = document.createElement("span"); lblSamp.innerText = "Samples"; lblSamp.style.fontSize="9px"; lblSamp.style.color="#888";
+        const sldSamp = document.createElement("input"); sldSamp.type = "range"; sldSamp.min = "1"; sldSamp.max = "256"; sldSamp.value = this.ptPreviewSamples; Object.assign(sldSamp.style, {flex: "1", width: "0"});
+        const inpSamp = document.createElement("input"); inpSamp.type = "number"; inpSamp.step = "1"; inpSamp.value = this.ptPreviewSamples; Object.assign(inpSamp.style, { width:"36px", background:"#111", color:"#ffaa00", border:"1px solid #444", fontSize:"9px", padding:"2px", textAlign:"right" });
+        const syncSamp = (v) => { this.ptPreviewSamples = v; sldSamp.value = v; inpSamp.value = v; this.needsPtReset = true; };
+        sldSamp.oninput = (e) => syncSamp(parseInt(e.target.value));
+        inpSamp.onchange = (e) => syncSamp(parseInt(e.target.value) || 32);
+        ptRow2.append(lblSamp, sldSamp, inpSamp);
+
+        ptBlock.append(ptTop, ptRow1, ptRow2);
+
+        globalContent.append(hdriBlock, ptBlock);
+        globalWrapper.appendChild(globalContent);
+        panelDiv.appendChild(globalWrapper);
+
+        this.globalUI = { chkHdriEn, selHdri, sldRot, inpRot, inpInt, chkPt, sldSamp, inpSamp };
+
         this.syncPropertiesPanel();
     }
 
@@ -1012,29 +1579,18 @@ class BlockoutViewport {
         if (document.activeElement !== this.propInputs.sz) this.propInputs.sz.value = m.scale.z.toFixed(3);
 
         if (obj.type === 'camera') {
-            this.propInputs.fovSection.style.display = 'block';
-            this.propInputs.orthoSection.style.display = 'block';
-            this.propInputs.clipNearSection.style.display = 'block';
-            this.propInputs.clipFarSection.style.display = 'block';
+            this.propInputs.camSection.style.display = 'flex';
+            this.propInputs.ortho.checked = this.isOrthographic;
             
-            if (document.activeElement !== this.propInputs.fov && document.activeElement !== this.propInputs.fovNum) {
-                this.propInputs.fov.value = m.fov ? m.fov.toFixed(1) : 45;
-                this.propInputs.fovNum.value = m.fov ? m.fov.toFixed(1) : 45;
+            if (document.activeElement !== this.propInputs.fovSld && document.activeElement !== this.propInputs.fovVal && document.activeElement !== this.propInputs.fovMm) {
+                this.propInputs.fovSld.value = this.perspCam.fov;
+                this.propInputs.fovVal.value = this.perspCam.fov.toFixed(1);
+                this.propInputs.fovMm.value = Math.round(this.perspCam.getFocalLength());
             }
-            if (document.activeElement !== this.propInputs.ortho) {
-                this.propInputs.ortho.checked = this.isOrthographic;
-            }
-            if (document.activeElement !== this.propInputs.clipNear) {
-                this.propInputs.clipNear.value = m.near.toFixed(2);
-            }
-            if (document.activeElement !== this.propInputs.clipFar) {
-                this.propInputs.clipFar.value = m.far.toFixed(1);
-            }
+            if (document.activeElement !== this.propInputs.clipNear) this.propInputs.clipNear.value = m.near.toFixed(2);
+            if (document.activeElement !== this.propInputs.clipFar) this.propInputs.clipFar.value = m.far.toFixed(1);
         } else {
-            this.propInputs.fovSection.style.display = 'none';
-            this.propInputs.orthoSection.style.display = 'none';
-            this.propInputs.clipNearSection.style.display = 'none';
-            this.propInputs.clipFarSection.style.display = 'none';
+            this.propInputs.camSection.style.display = 'none';
         }
 
         const isMesh = ['cube', 'plane', 'sphere', 'cone', 'cylinder', 'pipe', 'torus', 'imported'].includes(obj.type);
@@ -1154,13 +1710,12 @@ class BlockoutViewport {
 
             const activeCam = obj.mesh;
             
-            activeCam.fov = parseFloat(this.propInputs.fov.value) || 45;
             activeCam.near = parseFloat(this.propInputs.clipNear.value) || 0.1;
             activeCam.far = parseFloat(this.propInputs.clipFar.value) || 1000;
             
             if (activeCam.isOrthographicCamera) {
                 const aspect = this.renderer.domElement.clientWidth / this.renderer.domElement.clientHeight;
-                const d = activeCam.fov / 10;
+                const d = this.perspCam.fov / 10;
                 activeCam.left = -d * aspect;
                 activeCam.right = d * aspect;
                 activeCam.top = d;
@@ -1169,30 +1724,40 @@ class BlockoutViewport {
             
             activeCam.updateProjectionMatrix();
             if (m !== activeCam) m.updateProjectionMatrix();
+            this.needsPtReset = true;
         }
 
         const isMesh = ['cube', 'plane', 'sphere', 'cone', 'cylinder', 'pipe', 'torus', 'imported'].includes(obj.type);
         const isLight = ['pointlight', 'directionallight', 'spotlight'].includes(obj.type);
 
         if (isMesh) {
-            if (m.material) {
-                m.material.color.set(this.propInputs.color.value);
-            } else if (m.children && m.children.length > 0) {
-                m.traverse(c => {
-                    if (c.isMesh && c.material && c.material.color) {
-                        c.material.color.set(this.propInputs.color.value);
-                    }
-                });
+    const newColor = this.propInputs.color.value;
+    if (m.material && m.material.color) m.material.color.set(newColor);
+    if (m.userData.originalMaterial && m.userData.originalMaterial.color) m.userData.originalMaterial.color.set(newColor);
+    if (m.userData.clayMat && m.userData.clayMat.color) m.userData.clayMat.color.set(newColor);
+    
+    // Also cover children if it's a group
+    if (m.children && m.children.length > 0) {
+        m.traverse(c => {
+            if (c.isMesh) {
+                if (c.material && c.material.color) c.material.color.set(newColor);
+                if (c.userData.originalMaterial && c.userData.originalMaterial.color) c.userData.originalMaterial.color.set(newColor);
+                if (c.userData.clayMat && c.userData.clayMat.color) c.userData.clayMat.color.set(newColor);
             }
-        } else if (isLight) {
+        });
+    }
+}
+        else if (isLight) {
             const light = m.children[0];
             if (light) {
                 light.color.set(this.propInputs.color.value);
                 light.intensity = parseFloat(this.propInputs.intensity.value) || 0;
                 
-                if (m.material) {
-                    m.material.color.set(this.propInputs.color.value);
-                }
+                m.traverse(c => {
+                    if (c.userData.isHelper && c.material) {
+                        c.material.color.set(this.propInputs.color.value);
+                    }
+                });
 
                 if (obj.type === 'pointlight' || obj.type === 'spotlight') {
                     light.distance = parseFloat(this.propInputs.distance.value) || 0;
@@ -1270,16 +1835,17 @@ class BlockoutViewport {
         };
 
         const vd = 5;
-        viewPanel.appendChild(createViewBtn("TOP", null, () => { this.camera.position.set(0, vd, 0); this.controls.target.set(0,0,0); this.controls.update(); }));
-        viewPanel.appendChild(createViewBtn("BTM", null, () => { this.camera.position.set(0, -vd, 0); this.controls.target.set(0,0,0); this.controls.update(); }));
-        viewPanel.appendChild(createViewBtn("LEFT", null, () => { this.camera.position.set(-vd, 0, 0); this.controls.target.set(0,0,0); this.controls.update(); }));
-        viewPanel.appendChild(createViewBtn("RIGHT", null, () => { this.camera.position.set(vd, 0, 0); this.controls.target.set(0,0,0); this.controls.update(); }));
-        viewPanel.appendChild(createViewBtn("FRONT", null, () => { this.camera.position.set(0, 0, vd); this.controls.target.set(0,0,0); this.controls.update(); }));
-        viewPanel.appendChild(createViewBtn("BACK", null, () => { this.camera.position.set(0, 0, -vd); this.controls.target.set(0,0,0); this.controls.update(); }));
-        viewPanel.appendChild(createViewBtn("RESET", "span 2", () => { this.camera.position.set(0, 1.2, 4); this.controls.target.set(0,0,0); this.controls.update(); }));
+        viewPanel.appendChild(createViewBtn("TOP", null, () => { this.camera.position.set(0.001, vd, 0); this.controls.target.set(0,0,0); this.controls.update(); this.syncPropertiesPanel(); }));
+        viewPanel.appendChild(createViewBtn("BTM", null, () => { this.camera.position.set(0.001, -vd, 0); this.controls.target.set(0,0,0); this.controls.update(); this.syncPropertiesPanel(); }));
+        viewPanel.appendChild(createViewBtn("LEFT", null, () => { this.camera.position.set(-vd, 0, 0); this.controls.target.set(0,0,0); this.controls.update(); this.syncPropertiesPanel(); }));
+        viewPanel.appendChild(createViewBtn("RIGHT", null, () => { this.camera.position.set(vd, 0, 0); this.controls.target.set(0,0,0); this.controls.update(); this.syncPropertiesPanel(); }));
+        viewPanel.appendChild(createViewBtn("FRONT", null, () => { this.camera.position.set(0, 0, vd); this.controls.target.set(0,0,0); this.controls.update(); this.syncPropertiesPanel(); }));
+        viewPanel.appendChild(createViewBtn("BACK", null, () => { this.camera.position.set(0, 0, -vd); this.controls.target.set(0,0,0); this.controls.update(); this.syncPropertiesPanel(); }));
+        viewPanel.appendChild(createViewBtn("RESET", "span 2", () => { this.camera.position.set(0, 1.2, 4); this.controls.target.set(0,0,0); this.controls.update(); this.syncPropertiesPanel(); }));
         
         vpDiv.appendChild(viewPanel);
 
+        // --- SCENE PANEL (SAVE/LOAD/BAKE) ---
         const scenePanel = document.createElement("div");
         Object.assign(scenePanel.style, {
             position: "absolute", top: "10px", right: "130px", 
@@ -1289,29 +1855,21 @@ class BlockoutViewport {
         
         const btnSave = document.createElement("button");
         btnSave.innerText = "Save Scene";
-        Object.assign(btnSave.style, {
-            background: "#333", color: "#ccc", border: "1px solid #555", borderRadius: "3px",
-            padding: "4px 8px", fontSize: "10px", cursor: "pointer", fontWeight: "bold", textTransform: "uppercase"
-        });
+        Object.assign(btnSave.style, { background: "#333", color: "#ccc", border: "1px solid #555", borderRadius: "3px", padding: "4px 8px", fontSize: "10px", cursor: "pointer", fontWeight: "bold", textTransform: "uppercase" });
         btnSave.onmouseover = () => { btnSave.style.background = "#555"; btnSave.style.borderColor = "#00d2ff"; };
         btnSave.onmouseout = () => { btnSave.style.background = "#333"; btnSave.style.borderColor = "#555"; };
         btnSave.onclick = () => this.saveScene();
 
         const btnLoad = document.createElement("button");
         btnLoad.innerText = "Load Scene";
-        Object.assign(btnLoad.style, {
-            background: "#333", color: "#ccc", border: "1px solid #555", borderRadius: "3px",
-            padding: "4px 8px", fontSize: "10px", cursor: "pointer", fontWeight: "bold", textTransform: "uppercase"
-        });
+        Object.assign(btnLoad.style, { background: "#333", color: "#ccc", border: "1px solid #555", borderRadius: "3px", padding: "4px 8px", fontSize: "10px", cursor: "pointer", fontWeight: "bold", textTransform: "uppercase" });
         btnLoad.onmouseover = () => { btnLoad.style.background = "#555"; btnLoad.style.borderColor = "#00d2ff"; };
         btnLoad.onmouseout = () => { btnLoad.style.background = "#333"; btnLoad.style.borderColor = "#555"; };
         btnLoad.onclick = () => this.loadScene();
+
         const btnBake = document.createElement("button");
         btnBake.innerText = "BAKE";
-        Object.assign(btnBake.style, {
-            background: "transparent", color: "#ffaa00", border: "1px solid #ffaa00", borderRadius: "3px",
-            padding: "4px 8px", fontSize: "10px", cursor: "pointer", fontWeight: "bold", textTransform: "uppercase"
-        });
+        Object.assign(btnBake.style, { background: "transparent", color: "#ffaa00", border: "1px solid #ffaa00", borderRadius: "3px", padding: "4px 8px", fontSize: "10px", cursor: "pointer", fontWeight: "bold", textTransform: "uppercase" });
         btnBake.onmouseover = () => { btnBake.style.background = "rgba(255, 170, 0, 0.2)"; };
         btnBake.onmouseout = () => { btnBake.style.background = "transparent"; };
         btnBake.onclick = () => this.performBake(btnBake);
@@ -1526,6 +2084,26 @@ class BlockoutViewport {
                         if (this.isDepthMode) {
                             if (!c.userData.depthMat || !c.userData.depthMat.isMaterial) {
                                 c.userData.depthMat = new this.THREE.MeshDepthMaterial();
+                                c.userData.depthMat.userData = { shader: null };
+                                c.userData.depthMat.onBeforeCompile = (shader) => {
+                                    c.userData.depthMat.userData.shader = shader;
+                                    shader.uniforms.customDepthNear = { value: this.depthNear };
+                                    shader.uniforms.customDepthFar = { value: this.depthFar };
+                                    shader.vertexShader = 'varying float vCustomViewZ;\n' + shader.vertexShader;
+                                    shader.vertexShader = shader.vertexShader.replace(
+                                        '#include <project_vertex>',
+                                        '#include <project_vertex>\n\tvCustomViewZ = - mvPosition.z;'
+                                    );
+                                    shader.fragmentShader = 'uniform float customDepthNear;\nuniform float customDepthFar;\nvarying float vCustomViewZ;\n' + shader.fragmentShader;
+                                    shader.fragmentShader = shader.fragmentShader.replace(
+                                        'gl_FragColor = vec4( vec3( 1.0 - fragCoordZ ), opacity );',
+                                        `float d = (vCustomViewZ - customDepthNear) / (customDepthFar - customDepthNear);\n\t\td = 1.0 - clamp(d, 0.0, 1.0);\n\t\tgl_FragColor = vec4( vec3( d ), opacity );`
+                                    );
+                                };
+                            }
+                            if (c.userData.depthMat.userData && c.userData.depthMat.userData.shader) {
+                                c.userData.depthMat.userData.shader.uniforms.customDepthNear.value = this.depthNear;
+                                c.userData.depthMat.userData.shader.uniforms.customDepthFar.value = this.depthFar;
                             }
                             c.material = c.userData.depthMat;
                         } else if (this.displayMode === 'shaded') {
@@ -1547,20 +2125,32 @@ class BlockoutViewport {
             }
         });
 
-        if (this.isDepthMode) {
-            this.camera.near = this.depthNear;
-            this.camera.far = this.depthFar;
+        const camObj = this.sceneObjects.find(o => o.type === 'camera');
+        if (camObj && camObj.mesh) {
+            this.camera.near = camObj.mesh.near || 0.1;
+            this.camera.far = camObj.mesh.far || 1000;
         } else {
-            const camObj = this.sceneObjects.find(o => o.type === 'camera');
-            if (camObj && camObj.mesh) {
-                this.camera.near = camObj.mesh.near || 0.1;
-                this.camera.far = camObj.mesh.far || 1000;
-            } else {
-                this.camera.near = 0.1;
-                this.camera.far = 1000;
-            }
+            this.camera.near = 0.1;
+            this.camera.far = 1000;
         }
         this.camera.updateProjectionMatrix();
+
+        // Integrate HDRI visually onto materials based on UI selections
+        if (!this.isDepthMode && (this.displayMode === 'shaded' || this.displayMode === 'textured')) {
+            const activeHdriMap = this.hdriRenderTarget ? this.hdriRenderTarget.texture : this.currentHdriMap;
+            this.scene.environment = this.isHdriEnabled ? activeHdriMap : null;
+            this.scene.background = this.isHdriEnabled ? activeHdriMap : new this.THREE.Color(0x1a1a1a);
+        } else {
+            this.scene.environment = null;
+            this.scene.background = new this.THREE.Color(0x000000); 
+        }
+
+        const isPTActive = this.isPathTracingEnabled && (this.displayMode === 'shaded' || this.displayMode === 'textured') && this.ptRenderer && !this.isDepthMode;
+        if (isPTActive) {
+            this.needsPtReset = true;
+            this.needsPtBvhUpdate = true;
+            if (this.transformControls && this.selectedObjectId && !this.isBaking) this.transformControls.visible = true; 
+        }
     }
 
     handleKeyDown(e) {
@@ -1600,134 +2190,6 @@ class BlockoutViewport {
         if (e.key === 'F2') {
             this.promptRenameSelected();
         }
-    }
-
-    async performBake(btnEl) {
-        if (!this.node || !this.renderer) return;
-        const originalText = btnEl.innerText;
-        btnEl.innerText = "BAKING...";
-
-        let targetW = 512, targetH = 512;
-        const ww = this.node.widgets?.find(w => w.name === "width");
-        const wh = this.node.widgets?.find(w => w.name === "height");
-        if (ww) targetW = ww.value;
-        if (wh) targetH = wh.value;
-
-        const vpDiv = this.renderer.domElement.parentElement;
-        const origW = vpDiv.clientWidth;
-        const origH = vpDiv.clientHeight;
-        const origAspect = this.camera.aspect;
-        const origDisplayMode = this.displayMode;
-        const origWireframe = this.showWireframe;
-        const origDepth = this.isDepthMode;
-
-        const helpers = [];
-        this.scene.traverse(c => {
-            if (
-                c.userData.isHelper || 
-                c.userData.isWireframeOverlay ||
-                c.type === 'GridHelper' || 
-                c.type === 'AxesHelper' || 
-                c.type === 'TransformControls' || 
-                c.type.includes('Helper') || 
-                c.isLine ||
-                c.isSprite
-            ) {
-                if (c.visible) {
-                    helpers.push(c);
-                    c.visible = false;
-                }
-            }
-        });
-        
-        if (this.transformControls.visible) {
-            helpers.push(this.transformControls);
-            this.transformControls.visible = false;
-        }
-
-        const fixed = this.sceneObjects.filter(o => o.isFixed || o.type === 'camera');
-        fixed.forEach(o => { if (o.mesh && o.mesh.visible) { helpers.push(o.mesh); o.mesh.visible = false; }});
-        if (this.floor && this.floor.visible) { helpers.push(this.floor); this.floor.visible = false; }
-
-        let attachedObject = this.transformControls.object;
-        if (attachedObject) this.transformControls.detach();
-
-        const lights = this.sceneObjects.filter(o => ['pointlight', 'directionallight', 'spotlight'].includes(o.type));
-        lights.forEach(l => {
-            if (l.mesh && l.mesh.material) {
-                l.mesh.material.visible = false;
-            }
-        });
-
-        this.renderer.setSize(targetW, targetH, false);
-        this.camera.aspect = targetW / targetH;
-        this.camera.updateProjectionMatrix();
-
-        const captureFrame = async () => {
-            return new Promise(resolve => {
-                requestAnimationFrame(() => {
-                    this.renderer.render(this.scene, this.camera);
-                    resolve(this.renderer.domElement.toDataURL("image/jpeg", 0.92));
-                });
-            });
-        };
-
-        const origOverride = this.scene.overrideMaterial;
-
-        // SHADED PASS
-        this.displayMode = "shaded";
-        this.showWireframe = false;
-        this.isDepthMode = false;
-
-        this.updateDisplayMode();
-        const shaded64 = await captureFrame();
-
-        this.displayMode = "textured";
-        this.updateDisplayMode();
-        const textured64 = await captureFrame();
-
-        this.isDepthMode = true;
-        this.updateDisplayMode();
-        const depth64 = await captureFrame();
-
-        this.isDepthMode = false;
-        this.updateDisplayMode();
-        const normalMat = new this.THREE.MeshNormalMaterial();
-        this.scene.overrideMaterial = normalMat;
-        const normal64 = await captureFrame();
-        this.scene.overrideMaterial = origOverride;
-
-        this.displayMode = origDisplayMode;
-        this.showWireframe = origWireframe;
-        this.isDepthMode = origDepth;
-        this.updateDisplayMode();
-        
-        helpers.forEach(c => { c.visible = true; });
-        lights.forEach(l => {
-            if (l.mesh && l.mesh.material) {
-                l.mesh.material.visible = true;
-            }
-        });
-        if (attachedObject) this.transformControls.attach(attachedObject);
-
-        this.renderer.setSize(origW, origH, false);
-        this.camera.aspect = origAspect;
-        this.camera.updateProjectionMatrix();
-
-        const payload = {
-            shaded: shaded64,
-            textured: textured64,
-            depth: depth64,
-            normal: normal64
-        };
-
-        const wData = this.node.widgets?.find(w => w.name === "client_data");
-        if (wData) {
-            wData.value = JSON.stringify(payload);
-        }
-
-        btnEl.innerText = originalText;
-        app.queuePrompt(0);
     }
 
     onResize(vpDiv) {
@@ -1922,11 +2384,10 @@ class BlockoutViewport {
     }
 
     // =========================================================================
-    // CREATION PANEL (BOTTOM) - REDESIGNED
+    // CREATION PANEL (BOTTOM)
     // =========================================================================
 
     buildCreationPanel(panelDiv) {
-        // --- NEW SVG ICONS FOR CATEGORIES ---
         const icons = {
             basic: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>`,
             lighting: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5A4.61 4.61 0 0 1 8.91 14"/></svg>`,
@@ -1949,7 +2410,6 @@ class BlockoutViewport {
             { id: "food", label: "FOOD", icon: icons.food }
         ];
 
-        // --- TABS BAR ---
         const tabsRow = document.createElement("div");
         Object.assign(tabsRow.style, {
             display: "flex", background: "#222", borderBottom: "1px solid #333",
@@ -1964,7 +2424,6 @@ class BlockoutViewport {
         this.tabButtons = {};
         this.contentPanes = {};
 
-        // Action Buttons on Right
         const rightTabs = document.createElement("div");
         Object.assign(rightTabs.style, { display: "flex", alignItems: "center", paddingRight: "8px" });
 
@@ -1982,24 +2441,23 @@ class BlockoutViewport {
         fileIn.type = "file";
         fileIn.accept = ".glb,.gltf,.fbx";
         fileIn.style.display = "none";
-        fileIn.onchange = (e) => {
+        
+        fileIn.onchange = async (e) => {
             const file = e.target.files[0];
             if (!file) return;
-            const url = URL.createObjectURL(file);
-            const ext = file.name.split('.').pop().toLowerCase();
-            
-            if (ext === 'fbx') {
-                const loader = new this.FBXLoader();
-                loader.load(url, (fbx) => { this.addObject("imported", fbx, file.name); });
-            } else {
-                const loader = new this.GLTFLoader();
-                loader.load(url, (gltf) => { this.addObject("imported", gltf.scene, file.name); });
+            const origHTML = importBtn.innerHTML;
+            importBtn.innerHTML = "⏳";
+            const filename = await this.uploadCustomAsset(file, "yedp_envs");
+            importBtn.innerHTML = origHTML;
+            if (filename) {
+                this.loadCategoryAsset("yedp_envs", filename, true);
             }
+            fileIn.value = "";
         };
         importBtn.onclick = () => fileIn.click();
 
         const exportBtn = document.createElement("button");
-        exportBtn.innerText = "Export to AD";
+        exportBtn.innerText = "Export to A.D.";
         Object.assign(exportBtn.style, {
             background: "transparent", color: "#00d2ff", border: "1px solid #333", borderRadius: "4px",
             padding: "4px 12px", fontSize: "11px", fontWeight: "bold", textTransform: "uppercase",
@@ -2014,9 +2472,7 @@ class BlockoutViewport {
         rightTabs.appendChild(exportBtn);
         tabsRow.appendChild(rightTabs);
 
-        // --- BUILD TABS AND PANES ---
         categories.forEach((cat, index) => {
-            // Tab Button
             const tabBtn = document.createElement("div");
             Object.assign(tabBtn.style, {
                 padding: "6px 16px", background: index === 0 ? "#2b3035" : "transparent", 
@@ -2030,7 +2486,6 @@ class BlockoutViewport {
             leftTabs.appendChild(tabBtn);
             this.tabButtons[cat.id] = tabBtn;
 
-            // Content Pane
             const pane = document.createElement("div");
             Object.assign(pane.style, {
                 flex: "1", display: index === 0 ? "flex" : "none", flexWrap: "wrap", alignContent: "flex-start",
@@ -2039,7 +2494,6 @@ class BlockoutViewport {
             panelDiv.appendChild(pane);
             this.contentPanes[cat.id] = pane;
 
-            // Click Handler
             tabBtn.onclick = () => {
                 Object.values(this.tabButtons).forEach(b => {
                     b.style.background = "transparent";
@@ -2054,7 +2508,6 @@ class BlockoutViewport {
                 pane.style.display = "flex";
             };
 
-            // Populate logic
             if (cat.id === "basic" || cat.id === "lighting") {
                 this.populateCoreAssets(cat.id, pane);
             } else {
@@ -2089,19 +2542,16 @@ class BlockoutViewport {
                 justifyContent: "center", background: "#2a2a2a", overflow: "hidden"
             });
             
-            // Generate path for the thumbnail based on the .glb filename
             const baseName = filename.substring(0, filename.lastIndexOf('.'));
             const baseUrl = new URL(".", import.meta.url).href;
             const thumbUrl = new URL(`../blockout/${category}/${baseName}.png`, baseUrl).href;
 
             const fallbackSVG = `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#00d2ff" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>`;
 
-            // Try to load the .png thumbnail
             const img = document.createElement("img");
             img.src = thumbUrl;
             Object.assign(img.style, { width: "100%", height: "100%", objectFit: "cover" });
             
-            // If the thumbnail file doesn't exist, safely fallback to the generic icon
             img.onerror = () => {
                 iconArea.innerHTML = fallbackSVG;
             };
@@ -2110,7 +2560,7 @@ class BlockoutViewport {
             btn.appendChild(iconArea);
 
             const lbl = document.createElement("div");
-            lbl.innerText = filename.split('.')[0].substring(0, 10); // Truncate visually
+            lbl.innerText = filename.split('.')[0].substring(0, 10); 
             lbl.title = filename;
             Object.assign(lbl.style, { 
                 padding: "4px", width: "100%", textAlign: "center", background: "#1a1a1a", 
@@ -2241,70 +2691,27 @@ class BlockoutViewport {
 
     showModal(title, contentHtml, onConfirm) {
         const overlay = document.createElement("div");
-        Object.assign(overlay.style, {
-            position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
-            background: "rgba(0,0,0,0.8)", zIndex: 9999, display: "flex",
-            alignItems: "center", justifyContent: "center"
-        });
-
+        Object.assign(overlay.style, { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.8)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center" });
         const modal = document.createElement("div");
-        Object.assign(modal.style, {
-            background: "#222", padding: "16px", borderRadius: "8px",
-            border: "1px solid #444", minWidth: "300px", display: "flex", flexDirection: "column", gap: "12px",
-            boxShadow: "0 4px 12px rgba(0,0,0,0.5)"
-        });
-
-        const titleEl = document.createElement("div");
-        titleEl.innerText = title;
-        Object.assign(titleEl.style, { color: "#fff", fontWeight: "bold", fontSize: "14px" });
-        
-        const contentContainer = document.createElement("div");
-        contentContainer.innerHTML = contentHtml;
-        
-        const btnRow = document.createElement("div");
-        Object.assign(btnRow.style, { display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "8px" });
-        
-        const btnCancel = document.createElement("button");
-        btnCancel.innerText = "Cancel";
-        btnCancel.onclick = () => overlay.remove();
-        Object.assign(btnCancel.style, { background: "#444", color: "#fff", border: "none", padding: "6px 16px", borderRadius: "4px", cursor: "pointer", fontSize: "12px" });
-        
-        const btnOk = document.createElement("button");
-        btnOk.innerText = "OK";
-        btnOk.onclick = () => { if(onConfirm(modal) !== false) overlay.remove(); };
-        Object.assign(btnOk.style, { background: "#00d2ff", color: "#000", border: "none", padding: "6px 16px", borderRadius: "4px", cursor: "pointer", fontWeight: "bold", fontSize: "12px" });
-        
-        btnRow.append(btnCancel, btnOk);
-        modal.append(titleEl, contentContainer, btnRow);
-        overlay.appendChild(modal);
-        this.container.appendChild(overlay);
-        
-        const firstInput = modal.querySelector('input, select');
-        if (firstInput) firstInput.focus();
+        Object.assign(modal.style, { background: "#222", padding: "16px", borderRadius: "8px", border: "1px solid #444", minWidth: "300px", display: "flex", flexDirection: "column", gap: "12px", boxShadow: "0 4px 12px rgba(0,0,0,0.5)" });
+        const titleEl = document.createElement("div"); titleEl.innerText = title; Object.assign(titleEl.style, { color: "#fff", fontWeight: "bold", fontSize: "14px" });
+        const contentContainer = document.createElement("div"); contentContainer.innerHTML = contentHtml;
+        const btnRow = document.createElement("div"); Object.assign(btnRow.style, { display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "8px" });
+        const btnCancel = document.createElement("button"); btnCancel.innerText = "Cancel"; btnCancel.onclick = () => overlay.remove(); Object.assign(btnCancel.style, { background: "#444", color: "#fff", border: "none", padding: "6px 16px", borderRadius: "4px", cursor: "pointer", fontSize: "12px" });
+        const btnOk = document.createElement("button"); btnOk.innerText = "OK"; btnOk.onclick = () => { if(onConfirm(modal) !== false) overlay.remove(); }; Object.assign(btnOk.style, { background: "#00d2ff", color: "#000", border: "none", padding: "6px 16px", borderRadius: "4px", cursor: "pointer", fontWeight: "bold", fontSize: "12px" });
+        btnRow.append(btnCancel, btnOk); modal.append(titleEl, contentContainer, btnRow); overlay.appendChild(modal); this.container.appendChild(overlay);
+        const firstInput = modal.querySelector('input, select'); if (firstInput) firstInput.focus();
     }
 
     exportGLB() {
         if (!this.THREE || !this.GLTFExporter) return;
-        
-        console.log("[Yedp Blockout] Exporting GLB...");
-        
         const exportScene = new this.THREE.Scene();
-        
         this.sceneObjects.forEach(obj => {
-            if (!obj.visible) return;
-            if (obj.isFixed) return; 
-            if (obj.type === 'pointlight' || obj.type === 'directionallight' || obj.type === 'spotlight') return; 
-            
+            if (!obj.visible || obj.isFixed || ['pointlight', 'directionallight', 'spotlight'].includes(obj.type)) return; 
             const clone = obj.mesh.clone();
-
             const overlays = [];
-            clone.traverse(c => {
-                if (c.userData && c.userData.isWireframeOverlay) overlays.push(c);
-            });
-            overlays.forEach(c => {
-                if (c.parent) c.parent.remove(c);
-            });
-
+            clone.traverse(c => { if (c.userData && c.userData.isWireframeOverlay) overlays.push(c); });
+            overlays.forEach(c => { if (c.parent) c.parent.remove(c); });
             clone.traverse(c => {
                 if (c.userData) {
                     const safe = {};
@@ -2318,260 +2725,187 @@ class BlockoutViewport {
                     c.userData = safe;
                 }
             });
-
             exportScene.add(clone);
         });
 
-        this.showModal(
-            "Export GLB to Action Director",
-            `<input id="export-filename" type="text" value="Yedp_Blockout" style="width:100%; padding:6px; background:#111; color:#0f0; border:1px solid #0f0; border-radius:4px; box-sizing:border-box;">`,
-            (modal) => {
-                const filename = modal.querySelector("#export-filename").value.trim();
-                if (!filename) return false;
-                
-                const exporter = new this.GLTFExporter();
-                exporter.parse(
-                    exportScene,
-                    async (gltf) => {
-                        const blob = new Blob([gltf], { type: 'application/octet-stream' });
-                        const formData = new FormData();
-                        formData.append('subfolder', 'yedp_envs');
-                        formData.append('file', blob, filename + '.glb');
-
-                        try {
-                            const response = await fetch('/yedp/upload_asset', {
-                                method: 'POST',
-                                body: formData
-                            });
-                            if (response.ok) {
-                                console.log("[Yedp Blockout] Export complete. Saved to yedp_envs.");
-                                alert(`Successfully exported to yedp_envs/${filename}.glb!`);
-                            } else {
-                                throw new Error(await response.text());
-                            }
-                        } catch (e) {
-                            console.error("[Yedp Blockout] Upload failed:", e);
-                            alert("Export failed: " + e.message);
-                        }
-                    },
-                    (error) => {
-                        console.error('[Yedp Blockout] GLTF export error:', error);
-                    },
-                    { binary: true }
-                );
-            }
-        );
+        this.showModal("Export GLB to Action Director", `<input id="export-filename" type="text" value="Yedp_Blockout" style="width:100%; padding:6px; background:#111; color:#0f0; border:1px solid #0f0; border-radius:4px; box-sizing:border-box;">`, (modal) => {
+            const filename = modal.querySelector("#export-filename").value.trim();
+            if (!filename) return false;
+            new this.GLTFExporter().parse(exportScene, async (gltf) => {
+                const blob = new Blob([gltf], { type: 'application/octet-stream' });
+                const formData = new FormData(); formData.append('subfolder', 'yedp_envs'); formData.append('file', blob, filename + '.glb');
+                try {
+                    const response = await fetch('/yedp/upload_asset', { method: 'POST', body: formData });
+                    if (response.ok) alert(`Successfully exported to yedp_envs/${filename}.glb!`);
+                    else throw new Error(await response.text());
+                } catch (e) { alert("Export failed: " + e.message); }
+            }, (error) => console.error(error), { binary: true });
+        });
     }
 
     async saveScene() {
-        this.showModal(
-            "Save Scene",
-            `<input id="scene-name" type="text" value="MyScene" style="width:100%; padding:6px; background:#111; color:#0f0; border:1px solid #0f0; border-radius:4px; box-sizing:border-box;">`,
-            (modal) => {
-                const name = modal.querySelector("#scene-name").value.trim();
-                if (!name) return false;
+        this.showModal("Save Scene", `<input id="scene-name" type="text" value="MyScene" style="width:100%; padding:6px; background:#111; color:#0f0; border:1px solid #0f0; border-radius:4px; box-sizing:border-box;">`, (modal) => {
+            const name = modal.querySelector("#scene-name").value.trim();
+            if (!name) return false;
 
-                const origDisplayMode = this.displayMode;
-                const origWireframe = this.showWireframe;
-                const origDepth = this.isDepthMode;
+            const origDisplayMode = this.displayMode; const origWireframe = this.showWireframe; const origDepth = this.isDepthMode;
+            this.displayMode = 'textured'; this.showWireframe = false; this.isDepthMode = false; this.updateDisplayMode();
 
-                this.displayMode = 'textured';
-                this.showWireframe = false;
-                this.isDepthMode = false;
-                this.updateDisplayMode();
-
-                const exportScene = new this.THREE.Scene();
-                this.sceneObjects.forEach(obj => {
-                    if (!obj.visible || obj.isFixed) return;
-                    if (obj.type === 'pointlight' || obj.type === 'directionallight' || obj.type === 'spotlight') return; 
-                    const clone = obj.mesh.clone();
-                    
-                    const overlays = [];
-                    clone.traverse(c => {
-                        if (c.userData && c.userData.isWireframeOverlay) overlays.push(c);
-                    });
-                    overlays.forEach(c => {
-                        if (c.parent) c.parent.remove(c);
-                    });
-
-                    clone.traverse(c => {
-                        if (c.userData) {
-                            const safe = {};
-                            for (let key in c.userData) {
-                                const val = c.userData[key];
-                                if (val && val.isMaterial) continue; 
-                                if (val && Array.isArray(val) && val[0] && val[0].isMaterial) continue;
-                                if (key === 'wireframeMeshList') continue;
-                                safe[key] = val;
-                            }
-                            c.userData = safe;
+            const exportScene = new this.THREE.Scene();
+            this.sceneObjects.forEach(obj => {
+                if (!obj.visible || obj.isFixed || ['pointlight', 'directionallight', 'spotlight'].includes(obj.type)) return; 
+                const clone = obj.mesh.clone();
+                const overlays = [];
+                clone.traverse(c => { if (c.userData && c.userData.isWireframeOverlay) overlays.push(c); });
+                overlays.forEach(c => { if (c.parent) c.parent.remove(c); });
+                clone.traverse(c => {
+                    if (c.userData) {
+                        const safe = {};
+                        for (let key in c.userData) {
+                            const val = c.userData[key];
+                            if (val && val.isMaterial) continue; 
+                            if (val && Array.isArray(val) && val[0] && val[0].isMaterial) continue;
+                            if (key === 'wireframeMeshList') continue;
+                            safe[key] = val;
                         }
-                    });
-
-                    clone.userData.blockoutType = obj.type;
-                    clone.userData.blockoutName = obj.name;
-
-                    exportScene.add(clone);
+                        c.userData = safe;
+                    }
                 });
-                
-                const exporter = new this.GLTFExporter();
-                exporter.parse(
-                    exportScene,
-                    async (gltf) => {
-                        this.displayMode = origDisplayMode;
-                        this.showWireframe = origWireframe;
-                        this.isDepthMode = origDepth;
-                        this.updateDisplayMode();
-
-                        const lightData = [];
-                        this.sceneObjects.forEach(obj => {
-                            if (obj.visible && !obj.isFixed && ['pointlight', 'directionallight', 'spotlight'].includes(obj.type)) {
-                                const actualLight = obj.mesh.isLight ? obj.mesh : obj.mesh.children.find(c => c.isLight);
-                                if (actualLight) {
-                                    lightData.push({
-                                        type: obj.type,
-                                        name: obj.name,
-                                        color: actualLight.color.getHex(),
-                                        intensity: actualLight.intensity,
-                                        position: obj.mesh.position.toArray(),
-                                        distance: actualLight.distance,
-                                        angle: actualLight.angle,
-                                        penumbra: actualLight.penumbra,
-                                        decay: actualLight.decay
-                                    });
-                                }
-                            }
-                        });
-
-                        gltf.asset = gltf.asset || {};
-                        gltf.asset.extras = {
-                            cameraPos: this.camera.position.toArray(),
-                            cameraTarget: this.controls.target.toArray(),
-                            lights: lightData,
-                            isDepthMode: this.isDepthMode, 
-                            depthNear: this.depthNear,
-                            depthFar: this.depthFar,
-                            displayMode: this.displayMode,
-                            showWireframe: this.showWireframe
-                        };
-
-                        const res = await fetch("/yedp/save_scene", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ name: name, data: gltf })
-                        });
-                        const resData = await res.json();
-                        if (resData.status === "success") {
-                            alert(`Scene "${name}" saved successfully!`);
-                        } else {
-                            alert("Error saving scene: " + resData.message);
-                        }
-                    },
-                    (err) => {
-                        this.displayMode = origDisplayMode;
-                        this.showWireframe = origWireframe;
-                        this.isDepthMode = origDepth;
-                        this.updateDisplayMode();
-                        console.error(err);
-                    },
-                    { binary: false } 
-                );
-            }
-        );
+                clone.userData.blockoutType = obj.type; clone.userData.blockoutName = obj.name;
+                exportScene.add(clone);
+            });
+            
+            new this.GLTFExporter().parse(exportScene, async (gltf) => {
+                this.displayMode = origDisplayMode; this.showWireframe = origWireframe; this.isDepthMode = origDepth; this.updateDisplayMode();
+                const stateStr = this.serializeWorkflowState(); const stateObj = JSON.parse(stateStr);
+                gltf.asset = gltf.asset || {}; gltf.asset.extras = stateObj;
+                const res = await fetch("/yedp/save_scene", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name, data: gltf }) });
+                const resData = await res.json();
+                if (resData.status === "success") alert(`Scene "${name}" saved successfully!`);
+                else alert("Error saving scene: " + resData.message);
+            }, (err) => {
+                this.displayMode = origDisplayMode; this.showWireframe = origWireframe; this.isDepthMode = origDepth; this.updateDisplayMode();
+            }, { binary: false });
+        });
     }
 
     async loadScene() {
-        const res = await fetch("/yedp/get_scenes");
-        const data = await res.json();
-        const files = data.files || [];
-        if (files.length === 0) {
-            alert("No saved scenes found in input/yedp_blockout.");
-            return;
-        }
+        const res = await fetch("/yedp/get_scenes"); const data = await res.json(); const files = data.files || [];
+        if (files.length === 0) return alert("No saved scenes found in input/yedp_blockout.");
 
         const options = files.map(f => `<option value="${f}">${f}</option>`).join('');
-        this.showModal(
-            "Load Scene",
-            `<select id="scene-select" style="width:100%; padding:6px; background:#111; color:#0f0; border:1px solid #0f0; border-radius:4px; box-sizing:border-box;">${options}</select>`,
-            (modal) => {
-                const name = modal.querySelector("#scene-select").value;
-                if (!name) return false;
+        this.showModal("Load Scene", `<select id="scene-select" style="width:100%; padding:6px; background:#111; color:#0f0; border:1px solid #0f0; border-radius:4px; box-sizing:border-box;">${options}</select>`, (modal) => {
+            const name = modal.querySelector("#scene-select").value;
+            if (!name) return false;
+            const url = `/view?filename=${name}&type=input&subfolder=yedp_blockout&t=${Date.now()}`;
+            new this.GLTFLoader().load(url, (gltf) => {
+                this.selectObjectById(null);
+                const toDelete = this.sceneObjects.filter(o => !o.isFixed).map(o => o.id);
+                toDelete.forEach(id => this.deleteObject(id));
 
-                const url = `/view?filename=${name}&type=input&subfolder=yedp_blockout&t=${Date.now()}`;
-                
-                const loader = new this.GLTFLoader();
-                loader.load(url, (gltf) => {
-                    this.selectObjectById(null);
+                let ex = null;
+                if (gltf.parser && gltf.parser.json && gltf.parser.json.asset && gltf.parser.json.asset.extras) ex = gltf.parser.json.asset.extras;
+                else if (gltf.asset && gltf.asset.extras) ex = gltf.asset.extras;
 
-                    const toDelete = this.sceneObjects.filter(o => !o.isFixed).map(o => o.id);
-                    toDelete.forEach(id => this.deleteObject(id));
-
+                if (ex && ex.version) {
+                    this.restoreWorkflowState(JSON.stringify(ex));
+                } else {
                     const children = [...gltf.scene.children];
                     children.forEach(child => {
-                        gltf.scene.remove(child);
-                        child.userData.isSceneLoad = true;
-                        const type = child.userData.blockoutType || "imported";
-                        const bname = child.userData.blockoutName || child.name || "Loaded_Obj";
+                        gltf.scene.remove(child); child.userData.isSceneLoad = true;
+                        const type = child.userData.blockoutType || "imported"; const bname = child.userData.blockoutName || child.name || "Loaded_Obj";
                         this.addObject(type, child, bname, false); 
                     });
+                    this.updateDisplayMode();
+                }
+            });
+        });
+    }
 
-                    let ex = null;
-                    if (gltf.parser && gltf.parser.json && gltf.parser.json.asset && gltf.parser.json.asset.extras) {
-                        ex = gltf.parser.json.asset.extras;
-                    } else if (gltf.asset && gltf.asset.extras) {
-                        ex = gltf.asset.extras;
-                    } else if (gltf.scenes && gltf.scenes[0] && gltf.scenes[0].userData) {
-                        ex = gltf.scenes[0].userData;
-                    } else if (gltf.scene && gltf.scene.userData) {
-                        ex = gltf.scene.userData;
-                    } else if (gltf.scenes && gltf.scenes[0] && gltf.scenes[0].extras) {
-                        ex = gltf.scenes[0].extras; 
-                    }
+    async performBake(btnEl) {
+        if (!this.node || !this.renderer) return;
+        this.isBaking = true;
+        try {
+            const originalText = btnEl.innerText; btnEl.innerText = "BAKING...";
+        let targetW = 512, targetH = 512;
+        const ww = this.node.widgets?.find(w => w.name === "width"); const wh = this.node.widgets?.find(w => w.name === "height");
+        if (ww) targetW = ww.value; if (wh) targetH = wh.value;
 
-                    if (ex) {
-                        if (ex.cameraPos) this.camera.position.fromArray(ex.cameraPos);
-                        if (ex.cameraTarget) this.controls.target.fromArray(ex.cameraTarget);
-                        this.controls.update();
+        const vpDiv = this.renderer.domElement.parentElement;
+        const origW = vpDiv.clientWidth; const origH = vpDiv.clientHeight; const origAspect = this.camera.aspect;
+        const origDisplayMode = this.displayMode; const origWireframe = this.showWireframe; const origDepth = this.isDepthMode;
+        const origBg = this.scene.background; const origEnv = this.scene.environment;
 
-                        if (ex.lights && Array.isArray(ex.lights)) {
-                            ex.lights.forEach(l => {
-                                const entry = this.addObject(l.type, null, null, false);
-                                if (!entry) return;
-                                if (l.name) entry.name = l.name;
-                                entry.mesh.position.fromArray(l.position);
-                                const actualLight = entry.mesh.children.find(c => c.isLight);
-                                if (actualLight) {
-                                    actualLight.color.setHex(l.color);
-                                    actualLight.intensity = l.intensity;
-                                    if (l.distance !== undefined) actualLight.distance = l.distance;
-                                    if (l.angle !== undefined) actualLight.angle = l.angle;
-                                    if (l.penumbra !== undefined) actualLight.penumbra = l.penumbra;
-                                    if (l.decay !== undefined) actualLight.decay = l.decay;
-                                }
-                            });
-                        }
-
-                        if (ex.isDepthMode !== undefined) this.isDepthMode = ex.isDepthMode;
-                        if (ex.depthNear !== undefined) this.depthNear = ex.depthNear;
-                        if (ex.depthFar !== undefined) this.depthFar = ex.depthFar;
-                        if (ex.displayMode !== undefined) this.displayMode = ex.displayMode;
-                        if (ex.showWireframe !== undefined) this.showWireframe = ex.showWireframe;
-
-                        if (this.propInputs.depthCheck) this.propInputs.depthCheck.checked = this.isDepthMode;
-                        if (this.propInputs.depthNear) this.propInputs.depthNear.value = this.depthNear;
-                        if (this.propInputs.depthFar) this.propInputs.depthFar.value = this.depthFar;
-                    }
-
-                    setTimeout(() => {
-                        if (this.updateToolbarUI) {
-                            this.updateToolbarUI();
-                        } else {
-                            this.updateDisplayMode();
-                        }
-                    }, 50);
-                });
+        const helpers = [];
+        this.scene.traverse(c => {
+            if (c.userData.isHelper || c.userData.isWireframeOverlay || c.type === 'GridHelper' || c.type === 'AxesHelper' || c.type === 'TransformControls' || c.type.includes('Helper') || c.isLine || c.isSprite) {
+                if (c.visible) { helpers.push(c); c.visible = false; }
             }
-        );
+        });
+        
+        if (this.transformControls.visible) { helpers.push(this.transformControls); this.transformControls.visible = false; }
+        const fixed = this.sceneObjects.filter(o => o.isFixed || o.type === 'camera');
+        fixed.forEach(o => { if (o.mesh && o.mesh.visible) { helpers.push(o.mesh); o.mesh.visible = false; }});
+        if (this.floor && this.floor.visible) { helpers.push(this.floor); this.floor.visible = false; }
+
+        let attachedObject = this.transformControls.object;
+        if (attachedObject) this.transformControls.detach();
+
+        const lights = this.sceneObjects.filter(o => ['pointlight', 'directionallight', 'spotlight'].includes(o.type));
+        lights.forEach(l => { if (l.mesh && l.mesh.material) l.mesh.material.visible = false; });
+
+        this.renderer.setSize(targetW, targetH, false); this.camera.aspect = targetW / targetH; this.camera.updateProjectionMatrix();
+
+        const captureFrame = async (skipRender = false) => {
+            return new Promise(resolve => { requestAnimationFrame(() => { if (!skipRender) this.renderer.render(this.scene, this.camera); resolve(this.renderer.domElement.toDataURL("image/jpeg", 0.92)); }); });
+        };
+
+        const origOverride = this.scene.overrideMaterial;
+
+        this.displayMode = "shaded"; this.showWireframe = false; this.isDepthMode = false; this.updateDisplayMode();
+        let shaded64 = null;
+
+        if (this.isPathTracingEnabled && this.ptRenderer) {
+            const origFloorMat = this.floor.material;
+            if (!this.ptFloorMat) this.ptFloorMat = new this.THREE.MeshStandardMaterial({ color: 0x222222, roughness: 1.0, metalness: 0.0 });
+            this.floor.material = this.ptFloorMat;
+            this.ptRenderer.setScene(this.scene, this.camera);
+            let lastUIUpdate = 0;
+            while (this.ptRenderer.samples < this.ptPreviewSamples) {
+                this.ptRenderer.renderSample();
+                const currentSample = Math.floor(this.ptRenderer.samples);
+                if (currentSample > lastUIUpdate) {
+                    lastUIUpdate = currentSample; btnEl.innerText = `PT BAKING [${currentSample}/${this.ptPreviewSamples}]`;
+                    if (currentSample % 5 === 0) await new Promise(r => setTimeout(r, 1)); 
+                }
+            }
+            shaded64 = await captureFrame(true);
+            this.floor.material = origFloorMat;
+        } else { shaded64 = await captureFrame(); }
+        
+        this.displayMode = "textured"; this.updateDisplayMode(); const textured64 = await captureFrame();
+        this.isDepthMode = true; this.updateDisplayMode(); const depth64 = await captureFrame();
+        this.isDepthMode = false; this.updateDisplayMode();
+        this.scene.overrideMaterial = new this.THREE.MeshNormalMaterial(); this.scene.background = new this.THREE.Color(0x000000); 
+        const normal64 = await captureFrame();
+        this.scene.overrideMaterial = origOverride;
+
+        this.displayMode = origDisplayMode; this.showWireframe = origWireframe; this.isDepthMode = origDepth;
+        this.scene.background = origBg; this.scene.environment = origEnv; this.updateDisplayMode();
+        
+        helpers.forEach(c => { c.visible = true; });
+        lights.forEach(l => { if (l.mesh && l.mesh.material) l.mesh.material.visible = true; });
+        if (attachedObject) { this.transformControls.attach(attachedObject); this.selectObjectById(this.selectedObjectId); }
+
+        this.renderer.setSize(origW, origH, false); this.camera.aspect = origAspect; this.camera.updateProjectionMatrix();
+
+        const wData = this.node.widgets?.find(w => w.name === "client_data");
+        if (wData) wData.value = JSON.stringify({ shaded: shaded64, textured: textured64, depth: depth64, normal: normal64 });
+
+        btnEl.innerText = originalText; app.queuePrompt(0);
+        } finally {
+            this.isBaking = false;
+        }
     }
 
     animate() {
@@ -2579,7 +2913,47 @@ class BlockoutViewport {
         requestAnimationFrame(() => this.animate());
 
         if (this.controls) this.controls.update();
-        this.renderer.render(this.scene, this.camera);
+
+        const isPTActive = this.isPathTracingEnabled && (this.displayMode === 'shaded' || this.displayMode === 'textured') && this.ptRenderer && !this.isMoving && !this.isDepthMode;
+
+        if (isPTActive) {
+            if (this.needsPtReset) {
+                if (this.needsPtBvhUpdate) {
+                    const helpers = [];
+                    this.scene.traverse(c => {
+                        if (c.userData.isHelper || c.isSprite || c.type === 'GridHelper' || c.type === 'AxesHelper' || c.type === 'TransformControls' || (c.material && c.material.wireframe)) {
+                            if (c.visible) { helpers.push(c); c.visible = false; }
+                        }
+                    });
+                    
+                    const origFloorMat = this.floor.material;
+                    if (!this.ptFloorMat) this.ptFloorMat = new this.THREE.MeshStandardMaterial({ color: 0x222222, roughness: 1.0, metalness: 0.0 });
+                    this.floor.material = this.ptFloorMat;
+
+                    this.ptRenderer.setScene(this.scene, this.camera);
+                    
+                    this.floor.material = origFloorMat;
+                    helpers.forEach(c => c.visible = true);
+                    this.needsPtBvhUpdate = false;
+                } else {
+                    this.ptRenderer.updateCamera();
+                }
+                this.needsPtReset = false;
+            }
+
+            if (this.ptRenderer.samples < this.ptPreviewSamples) {
+                this.ptRenderer.renderSample();
+            }
+            
+            const ptCounter = this.container.querySelector("#pt-sample-counter");
+            if (ptCounter) ptCounter.innerText = `${Math.floor(this.ptRenderer.samples)} / ${this.ptPreviewSamples}`;
+
+        } else {
+            this.renderer.render(this.scene, this.camera);
+            
+            const ptCounter = this.container.querySelector("#pt-sample-counter");
+            if (ptCounter && this.isPathTracingEnabled) ptCounter.innerText = `0 / ${this.ptPreviewSamples}`;
+        }
     }
 
     destroy() {
@@ -2653,7 +3027,29 @@ app.registerExtension({
                         this.blockoutVp.destroy();
                     }
                 };
+                
+                
+
                 return r;
+            };
+
+            const onSerializeOrig = nodeType.prototype.onSerialize;
+            nodeType.prototype.onSerialize = function (o) {
+                if (onSerializeOrig) onSerializeOrig.apply(this, arguments);
+                if (this.blockoutVp) {
+                    o.scene_state = this.blockoutVp.serializeWorkflowState();
+                }
+            };
+
+            const onConfigureOrig = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function (o) {
+                if (onConfigureOrig) onConfigureOrig.apply(this, arguments);
+                if (o.scene_state) {
+                    this.saved_scene_state = o.scene_state;
+                    if (this.blockoutVp && this.blockoutVp.isInitialized) {
+                        this.blockoutVp.restoreWorkflowState(this.saved_scene_state);
+                    }
+                }
             };
         }
     }
