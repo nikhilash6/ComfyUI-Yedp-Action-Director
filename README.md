@@ -57,7 +57,8 @@ Instead of relying on jittery raw AI outputs, Mocap Surgeon provides a professio
 
 ## **🧊 Yedp Blockout**
 
-<img width="1386" height="981" alt="1209356a4063eac67acfa4f9252056e8" src="https://github.com/user-attachments/assets/b145bea1-31ba-48b5-a07e-69e93a49e495" />
+<img width="1487" height="975" alt="2cf391510075d117a07ca4f0faee57a2" src="https://github.com/user-attachments/assets/ed12f04e-ab02-4ec4-ad0f-cd397e42df46" />
+
 A user-friendly node meant to quickly build a 3D scene for generation, export GLB files directly to Yedp Action Director input folder.
 
 **Currently in development!**
