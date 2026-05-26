@@ -78,6 +78,7 @@ class BlockoutViewport {
         this.currentHdriMap = null;
         this.hdriFile = "none";
         this.isHdriEnabled = false;
+        this.enableShadows = true;
         this.hdriRotation = 0;
         this.hdriIntensity = 1.0;
         this.hdriRenderTarget = null;
@@ -110,6 +111,11 @@ class BlockoutViewport {
         this._handleKeyDown = this.handleKeyDown.bind(this);
         window.addEventListener('keydown', this._handleKeyDown);
 
+        this.historyStack = [];
+        this.historyIndex = -1;
+        this.MAX_HISTORY = 20;
+        this.isRestoringHistory = false;
+        
         this.init();
     }
 
@@ -299,6 +305,31 @@ class BlockoutViewport {
             });
             centerColDiv.appendChild(viewportDiv);
 
+            // History UI
+            this.historyDiv = document.createElement("div");
+            Object.assign(this.historyDiv.style, {
+                position: "absolute", bottom: "10px", right: "10px", display: "flex", gap: "8px", zIndex: "10"
+            });
+            this.btnUndo = document.createElement("button");
+            this.btnUndo.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"></path><path d="M21 17a9 9 0 00-9-9 9 9 0 00-6 2.3l-3 2.7"></path></svg>`;
+            this.btnUndo.title = "Undo (Z)";
+            this.btnRedo = document.createElement("button");
+            this.btnRedo.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"></path><path d="M3 17a9 9 0 019-9 9 9 0 016 2.3l3 2.7"></path></svg>`;
+            this.btnRedo.title = "Redo (Y)";
+            
+            [this.btnUndo, this.btnRedo].forEach(btn => {
+                Object.assign(btn.style, {
+                    background: "#222", border: "1px solid #444", borderRadius: "4px", color: "#ccc", padding: "8px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.1s"
+                });
+                btn.onmouseover = () => { btn.style.borderColor = "#00d2ff"; btn.style.color = "#00d2ff"; };
+                btn.onmouseout = () => { btn.style.borderColor = "#444"; btn.style.color = "#ccc"; };
+            });
+            this.btnUndo.onclick = () => this.undo();
+            this.btnRedo.onclick = () => this.redo();
+            this.historyDiv.appendChild(this.btnUndo);
+            this.historyDiv.appendChild(this.btnRedo);
+            viewportDiv.appendChild(this.historyDiv);
+            
             this.gate = document.createElement("div");
             this.gate.className = "yedp-resolution-gate";
             Object.assign(this.gate.style, {
@@ -413,7 +444,10 @@ class BlockoutViewport {
             this.transformControls.addEventListener('dragging-changed', (event) => {
                 this.controls.enabled = !event.value;
                 this.isMoving = event.value; // Drop to WebGL while using Gizmo
-                if (!event.value) this.needsPtReset = true;
+                if (!event.value) {
+                    this.needsPtReset = true;
+                    this.captureHistoryState();
+                }
             });
             this.transformControls.addEventListener('change', () => {
                 this.needsPtReset = true;
@@ -495,6 +529,7 @@ class BlockoutViewport {
                 this.restoreWorkflowState(this.node.saved_scene_state);
             }
             this.isInitialized = true;
+            this.captureHistoryState();
 
         } catch (e) {
             this.container.innerHTML = `<div style="color:red; padding:20px;">[Yedp Blockout] Init Error: ${e.message}</div>`;
@@ -529,7 +564,8 @@ class BlockoutViewport {
                 hdriFile: this.hdriFile,
                 isHdriEnabled: this.isHdriEnabled,
                 hdriRotation: this.hdriRotation,
-                hdriIntensity: this.hdriIntensity
+                hdriIntensity: this.hdriIntensity,
+                enableShadows: this.enableShadows
             },
             objects: this.sceneObjects.filter(o => !o.isFixed).map(o => {
                 let colorHex = 0xffffff;
@@ -597,6 +633,7 @@ class BlockoutViewport {
                 this.isHdriEnabled = state.settings.isHdriEnabled || false;
                 this.hdriRotation = state.settings.hdriRotation || 0;
                 this.hdriIntensity = state.settings.hdriIntensity !== undefined ? state.settings.hdriIntensity : 1.0;
+                this.enableShadows = state.settings.enableShadows !== undefined ? state.settings.enableShadows : true;
 
                 if (this.propInputs.depthCheck) this.propInputs.depthCheck.checked = this.isDepthMode;
                 if (this.propInputs.depthNear) this.propInputs.depthNear.value = this.depthNear;
@@ -936,6 +973,7 @@ class BlockoutViewport {
         }
 
         this.refreshOutliner();
+        this.captureHistoryState();
         return entry;
     }
 
@@ -951,14 +989,21 @@ class BlockoutViewport {
         }
 
         this.scene.remove(entry.mesh);
-        if (entry.mesh.geometry) entry.mesh.geometry.dispose();
-        if (entry.mesh.material) {
-            if (Array.isArray(entry.mesh.material)) entry.mesh.material.forEach(m => m.dispose());
-            else entry.mesh.material.dispose();
-        }
+        // Deep-traverse to dispose all child geometries, materials, and textures (imported GLB/FBX models)
+        entry.mesh.traverse(c => {
+            if (c.geometry) c.geometry.dispose();
+            if (c.material) {
+                const mats = Array.isArray(c.material) ? c.material : [c.material];
+                mats.forEach(m => {
+                    for (const val of Object.values(m)) { if (val && val.isTexture) val.dispose(); }
+                    m.dispose();
+                });
+            }
+        });
 
         this.sceneObjects.splice(idx, 1);
         this.refreshOutliner();
+        this.captureHistoryState();
     }
 
     renameObject(id, newName) {
@@ -1445,11 +1490,159 @@ class BlockoutViewport {
             this.propInputs[keyPrefix + 'Section'] = section;
         };
 
+        
+        const createMaterialInput = (label, propName, step, min, max, isColor=false) => {
+            const section = document.createElement("div");
+            const lbl = document.createElement("div");
+            lbl.innerText = label;
+            Object.assign(lbl.style, { color: "#888", marginBottom: "4px", fontSize: "10px", textTransform: "uppercase" });
+            section.appendChild(lbl);
+
+            const row = document.createElement("div");
+            Object.assign(row.style, { display: "flex", gap: "4px", alignItems: "center" });
+
+            const wrap = document.createElement("div");
+            Object.assign(wrap.style, { flex: "1", display: "flex", alignItems: "center", background: "#222", borderRadius: "3px", border: "1px solid #444" });
+
+            const inp = document.createElement("input");
+            inp.type = isColor ? "color" : "number";
+            if (!isColor) { inp.step = step; inp.min = min; inp.max = max; }
+            Object.assign(inp.style, {
+                width: "100%", background: "transparent", border: "none", color: "#ccc",
+                padding: isColor ? "2px" : "4px 6px", height: isColor ? "24px" : "auto", 
+                fontSize: "11px", outline: "none", fontFamily: "inherit", cursor: isColor ? "pointer" : "text"
+            });
+            inp.addEventListener('input', () => this.applyPropertiesFromUI());
+            if (!isColor) inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') inp.blur(); });
+            wrap.appendChild(inp);
+            row.appendChild(wrap);
+
+            // Texture Slot
+            const texWrap = document.createElement("div");
+            Object.assign(texWrap.style, { position: "relative", width: "24px", height: "24px", background: "#111", border: "1px solid #444", borderRadius: "3px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" });
+            const texImg = document.createElement("img");
+            Object.assign(texImg.style, { width: "100%", height: "100%", objectFit: "cover", display: "none" });
+            const texIcon = document.createElement("div");
+            texIcon.innerHTML = `<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="#666" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`;
+            
+            const texClear = document.createElement("div");
+            texClear.innerHTML = `<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="#fff" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
+            Object.assign(texClear.style, { position: "absolute", top: "-4px", right: "-4px", background: "#f00", borderRadius: "50%", padding: "2px", display: "none", cursor: "pointer", zIndex: 10 });
+            
+            texWrap.append(texImg, texIcon, texClear);
+            row.appendChild(texWrap);
+
+            const fileIn = document.createElement("input");
+            fileIn.type = "file"; fileIn.accept = "image/*"; fileIn.style.display = "none";
+            texWrap.onclick = () => fileIn.click();
+
+            texClear.onclick = (e) => {
+                e.stopPropagation();
+                texImg.style.display = "none";
+                texIcon.style.display = "block";
+                texClear.style.display = "none";
+                const obj = this.getSelectedObject();
+                if (obj && obj.mesh) {
+                    const removeTex = (mat) => {
+                        const mapName = propName === 'color' ? 'map' : propName + 'Map';
+                        if (mat[mapName]) { mat[mapName].dispose(); mat[mapName] = null; mat.needsUpdate = true; }
+                    };
+                    obj.mesh.traverse(c => {
+                        if (c.isMesh) {
+                            if (c.userData.originalMaterial) {
+                                if (Array.isArray(c.userData.originalMaterial)) c.userData.originalMaterial.forEach(removeTex);
+                                else removeTex(c.userData.originalMaterial);
+                            }
+                            if (c.userData.clayMat && propName === 'normal') {
+                                removeTex(c.userData.clayMat);
+                            }
+                            if (this.displayMode === 'textured' && c.material) {
+                                if (Array.isArray(c.material)) c.material.forEach(removeTex);
+                                else removeTex(c.material);
+                            }
+                        }
+                    });
+                    this.needsPtReset = true;
+                }
+                fileIn.value = "";
+            };
+
+            fileIn.onchange = async (e) => {
+                const f = e.target.files[0];
+                if (!f) return;
+                const filename = await this.uploadCustomAsset(f, "yedp_envs");
+                if (filename) {
+                    const url = `/view?filename=${encodeURIComponent(filename)}&type=input&subfolder=yedp_envs&t=${Date.now()}`;
+                    new this.THREE.TextureLoader().load(url, (tex) => {
+                        tex.colorSpace = (propName === 'color') ? this.THREE.SRGBColorSpace : this.THREE.NoColorSpace;
+                        if (propName !== 'color') tex.generateMipmaps = false; // Roughness/Metal/Normal usually don't need SRGB
+                        tex.wrapS = this.THREE.RepeatWrapping;
+                        tex.wrapT = this.THREE.RepeatWrapping;
+                        
+                        texImg.src = url;
+                        texImg.style.display = "block";
+                        texIcon.style.display = "none";
+                        texClear.style.display = "block";
+
+                        const obj = this.getSelectedObject();
+                        if (obj && obj.mesh) {
+                            const applyTex = (mat) => {
+                                const mapName = propName === 'color' ? 'map' : propName + 'Map';
+                                mat[mapName] = tex;
+                                mat.needsUpdate = true;
+                            };
+                            obj.mesh.traverse(c => {
+                                if (c.isMesh) {
+                                    if (c.userData.originalMaterial) {
+                                        if (Array.isArray(c.userData.originalMaterial)) c.userData.originalMaterial.forEach(applyTex);
+                                        else applyTex(c.userData.originalMaterial);
+                                    }
+                                    if (c.userData.clayMat && propName === 'normal') {
+                                        applyTex(c.userData.clayMat);
+                                    }
+                                    if (this.displayMode === 'textured' && c.material) {
+                                        if (Array.isArray(c.material)) c.material.forEach(applyTex);
+                                        else applyTex(c.material);
+                                    }
+                                }
+                            });
+                            this.needsPtReset = true;
+                        }
+                    });
+                }
+            };
+
+            section.appendChild(row);
+            this.propsForm.appendChild(section);
+
+            this.propInputs[propName] = inp;
+            this.propInputs[propName + 'Section'] = section;
+            this.propInputs[propName + 'Img'] = texImg;
+            this.propInputs[propName + 'Icon'] = texIcon;
+            this.propInputs[propName + 'Clear'] = texClear;
+        };
+
+
+        
+        const shadowSection = document.createElement("div");
+        Object.assign(shadowSection.style, { display: "flex", gap: "4px", alignItems: "center" });
+        const chkLightShadow = document.createElement("input"); chkLightShadow.type = "checkbox";
+        chkLightShadow.onchange = () => this.applyPropertiesFromUI();
+        const lblLightShadow = document.createElement("label"); Object.assign(lblLightShadow.style, { cursor: "pointer", display: "flex", gap: "4px", color: "#ccc", fontSize: "10px", textTransform: "uppercase", alignItems: "center" });
+        lblLightShadow.append(chkLightShadow, "Cast Shadows");
+        shadowSection.appendChild(lblLightShadow);
+        this.propsForm.appendChild(shadowSection);
+        this.propInputs.shadowSection = shadowSection;
+        this.propInputs.castShadow = chkLightShadow;
+
         createScalarInput("Intensity", "intensity", 0.1);
         createScalarInput("Distance", "distance", 1);
         createScalarInput("Angle", "angle", 1);
         createScalarInput("Penumbra", "penumbra", 0.1);
-        createColorInput("Color", "color");
+        createMaterialInput("Color", "color", null, null, null, true);
+        createMaterialInput("Metalness", "metalness", 0.01, 0, 1, false);
+        createMaterialInput("Roughness", "roughness", 0.01, 0, 1, false);
+        createMaterialInput("Normal Scale", "normal", 0.01, 0, 5, false);
         
         panelDiv.appendChild(propsWrapper);
 
@@ -1541,6 +1734,8 @@ class BlockoutViewport {
 
         ptBlock.append(ptTop, ptRow1, ptRow2);
 
+        
+        
         globalContent.append(hdriBlock, ptBlock);
         globalWrapper.appendChild(globalContent);
         panelDiv.appendChild(globalWrapper);
@@ -1598,40 +1793,64 @@ class BlockoutViewport {
 
         if (isMesh) {
             this.propInputs.colorSection.style.display = 'block';
+            if (this.propInputs.colorImg) this.propInputs.colorImg.parentElement.style.display = 'flex';
+            this.propInputs.metalnessSection.style.display = 'block';
+            this.propInputs.roughnessSection.style.display = 'block';
+            this.propInputs.normalSection.style.display = 'block';
+            if (this.propInputs.shadowSection) this.propInputs.shadowSection.style.display = 'none';
+
             if (document.activeElement !== this.propInputs.color) {
-                let firstColor = null;
-                if (Array.isArray(m.material)) {
-                    const matWithColor = m.material.find(mat => mat && mat.color && typeof mat.color.getHexString === 'function');
-                    if (matWithColor) firstColor = matWithColor.color;
-                } else if (m.material && m.material.color && typeof m.material.color.getHexString === 'function') {
-                    firstColor = m.material.color;
-                } else if (m.children && m.children.length > 0) {
-                    m.traverse(c => {
-                        if (!firstColor && c.isMesh && c.material) {
-                            if (Array.isArray(c.material)) {
-                                const mc = c.material.find(mat => mat && mat.color && typeof mat.color.getHexString === 'function');
-                                if (mc) firstColor = mc.color;
-                            } else if (c.material.color && typeof c.material.color.getHexString === 'function') {
-                                firstColor = c.material.color;
-                            }
+                let firstMat = null;
+                m.traverse(c => {
+                    if (!firstMat && c.isMesh && c.material && !c.userData.isWireframeOverlay) {
+                        firstMat = Array.isArray(c.material) ? c.material[0] : c.material;
+                        if (c.userData.originalMaterial) {
+                            firstMat = Array.isArray(c.userData.originalMaterial) ? c.userData.originalMaterial[0] : c.userData.originalMaterial;
+                        }
+                    }
+                });
+
+                if (firstMat) {
+                    if (firstMat.color) this.propInputs.color.value = '#' + firstMat.color.getHexString();
+                    this.propInputs.metalness.value = firstMat.metalness !== undefined ? firstMat.metalness : 0;
+                    this.propInputs.roughness.value = firstMat.roughness !== undefined ? firstMat.roughness : 1;
+                    if (firstMat.normalScale) this.propInputs.normal.value = firstMat.normalScale.x || 1;
+                    
+                    const maps = [{prop: 'color', map: 'map'}, {prop: 'metalness', map: 'metalnessMap'}, {prop: 'roughness', map: 'roughnessMap'}, {prop: 'normal', map: 'normalMap'}];
+                    maps.forEach(mp => {
+                        const hasTex = firstMat[mp.map] && firstMat[mp.map].image;
+                        if (this.propInputs[mp.prop + 'Img']) {
+                            this.propInputs[mp.prop + 'Img'].style.display = hasTex ? "block" : "none";
+                            this.propInputs[mp.prop + 'Icon'].style.display = hasTex ? "none" : "block";
+                            this.propInputs[mp.prop + 'Clear'].style.display = hasTex ? "block" : "none";
+                            if (hasTex) this.propInputs[mp.prop + 'Img'].src = firstMat[mp.map].image.src;
                         }
                     });
-                }
-                
-                if (firstColor) {
-                    this.propInputs.color.value = '#' + firstColor.getHexString();
-                } else {
-                    this.propInputs.color.value = '#ffffff';
                 }
             }
         } else if (isLight) {
             this.propInputs.colorSection.style.display = 'block';
+            if (this.propInputs.colorImg) this.propInputs.colorImg.parentElement.style.display = 'none';
+            this.propInputs.metalnessSection.style.display = 'none';
+            this.propInputs.roughnessSection.style.display = 'none';
+            this.propInputs.normalSection.style.display = 'none';
+            if (this.propInputs.shadowSection) this.propInputs.shadowSection.style.display = 'block';
+            
             const light = m.children[0];
-            if (light && document.activeElement !== this.propInputs.color) {
-                this.propInputs.color.value = '#' + light.color.getHexString();
+            if (light) {
+                if (document.activeElement !== this.propInputs.color) {
+                    this.propInputs.color.value = '#' + light.color.getHexString();
+                }
+                if (document.activeElement !== this.propInputs.castShadow) {
+                    this.propInputs.castShadow.checked = light.castShadow;
+                }
             }
         } else {
             this.propInputs.colorSection.style.display = 'none';
+            this.propInputs.metalnessSection.style.display = 'none';
+            this.propInputs.roughnessSection.style.display = 'none';
+            this.propInputs.normalSection.style.display = 'none';
+            if (this.propInputs.shadowSection) this.propInputs.shadowSection.style.display = 'none';
         }
 
         if (isLight) {
@@ -1731,27 +1950,46 @@ class BlockoutViewport {
         const isLight = ['pointlight', 'directionallight', 'spotlight'].includes(obj.type);
 
         if (isMesh) {
-    const newColor = this.propInputs.color.value;
-    if (m.material && m.material.color) m.material.color.set(newColor);
-    if (m.userData.originalMaterial && m.userData.originalMaterial.color) m.userData.originalMaterial.color.set(newColor);
-    if (m.userData.clayMat && m.userData.clayMat.color) m.userData.clayMat.color.set(newColor);
-    
-    // Also cover children if it's a group
-    if (m.children && m.children.length > 0) {
-        m.traverse(c => {
-            if (c.isMesh) {
-                if (c.material && c.material.color) c.material.color.set(newColor);
-                if (c.userData.originalMaterial && c.userData.originalMaterial.color) c.userData.originalMaterial.color.set(newColor);
-                if (c.userData.clayMat && c.userData.clayMat.color) c.userData.clayMat.color.set(newColor);
-            }
-        });
-    }
-}
+            const newColor = this.propInputs.color.value;
+            const newMetal = parseFloat(this.propInputs.metalness.value) || 0;
+            const newRough = parseFloat(this.propInputs.roughness.value) || 0;
+            const newNorm = parseFloat(this.propInputs.normal.value) || 1;
+
+            const applyMat = (mat) => {
+                if (Array.isArray(mat)) {
+                    mat.forEach(m => applyMat(m));
+                    return;
+                }
+                if (mat.color) mat.color.set(newColor);
+                if (mat.metalness !== undefined) mat.metalness = newMetal;
+                if (mat.roughness !== undefined) mat.roughness = newRough;
+                if (mat.normalScale) mat.normalScale.set(newNorm, newNorm);
+            };
+
+            m.traverse(c => {
+                if (c.isMesh) {
+                    if (c.userData.originalMaterial) applyMat(c.userData.originalMaterial);
+                    if (this.displayMode === 'textured' && c.material) applyMat(c.material);
+                    if (c.userData.clayMat) {
+                        c.userData.clayMat.normalScale.set(newNorm, newNorm);
+                        c.userData.clayMat.needsUpdate = true;
+                    }
+                }
+            });
+            this.needsPtReset = true;
+        }
         else if (isLight) {
             const light = m.children[0];
             if (light) {
                 light.color.set(this.propInputs.color.value);
                 light.intensity = parseFloat(this.propInputs.intensity.value) || 0;
+                
+                const wantShadow = this.propInputs.castShadow.checked;
+                if (light.castShadow !== wantShadow) {
+                    light.castShadow = wantShadow;
+                    if (this.renderer.shadowMap) this.renderer.shadowMap.needsUpdate = true;
+                    this.needsPtReset = true;
+                }
                 
                 m.traverse(c => {
                     if (c.userData.isHelper && c.material) {
@@ -1774,11 +2012,11 @@ class BlockoutViewport {
             const mode = this.transformControls.getMode();
             this.transformControls.setMode(mode);
         }
-    }
 
-    // =========================================================================
-    // USER ACTIONS
-    // =========================================================================
+        // Debounced history capture — only fires after user stops changing properties for 500ms
+        clearTimeout(this._propHistoryTimeout);
+        this._propHistoryTimeout = setTimeout(() => this.captureHistoryState(), 500);
+    }
 
     deleteSelectedObject() {
         if (this.selectedObjectId === null) return;
@@ -2110,6 +2348,14 @@ class BlockoutViewport {
                             if (!c.userData.clayMat || !c.userData.clayMat.isMaterial) {
                                 c.userData.clayMat = new this.THREE.MeshStandardMaterial({ color: 0xaaaaaa, roughness: 0.8, metalness: 0.1 });
                             }
+                            if (c.userData.originalMaterial) {
+                                const om = Array.isArray(c.userData.originalMaterial) ? c.userData.originalMaterial[0] : c.userData.originalMaterial;
+                                c.userData.clayMat.normalMap = om.normalMap || null;
+                                if (om.normalScale) {
+                                    c.userData.clayMat.normalScale.copy(om.normalScale);
+                                }
+                            }
+                            c.userData.clayMat.needsUpdate = true;
                             c.material = c.userData.clayMat;
                         } else {
                             c.material = c.userData.originalMaterial;
@@ -2155,7 +2401,7 @@ class BlockoutViewport {
 
     handleKeyDown(e) {
         if (!this.isHovered) return;
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
         switch (e.key.toLowerCase()) {
             case 'g':
@@ -2174,6 +2420,12 @@ class BlockoutViewport {
             case 'delete':
                 this.deleteSelectedObject();
                 break;
+            case 'z':
+                this.undo();
+                break;
+            case 'y':
+                this.redo();
+                break;
             case 'h':
                 if (this.selectedObjectId !== null) {
                     this.toggleObjectVisibility(this.selectedObjectId);
@@ -2186,10 +2438,6 @@ class BlockoutViewport {
                 this.selectObjectById(null);
                 break;
         }
-
-        if (e.key === 'F2') {
-            this.promptRenameSelected();
-        }
     }
 
     onResize(vpDiv) {
@@ -2198,7 +2446,16 @@ class BlockoutViewport {
         const h = vpDiv.clientHeight;
         if (w && h) {
             this.renderer.setSize(w, h, false);
-            this.camera.aspect = w / h;
+            if (this.camera.isPerspectiveCamera) {
+                this.camera.aspect = w / h;
+            } else if (this.camera.isOrthographicCamera) {
+                const d = this.perspCam.fov / 10;
+                const aspect = w / h;
+                this.camera.left = -d * aspect;
+                this.camera.right = d * aspect;
+                this.camera.top = d;
+                this.camera.bottom = -d;
+            }
             this.camera.updateProjectionMatrix();
             this.updateResolutionGate();
         }
@@ -2310,6 +2567,7 @@ class BlockoutViewport {
             this.transformControls.attach(m);
         }
         this.syncPropertiesPanel();
+        this.captureHistoryState();
     }
 
     buildSnapControls(vpDiv) {
@@ -2407,7 +2665,8 @@ class BlockoutViewport {
             { id: "furniture", label: "FURNITURE", icon: icons.furniture },
             { id: "props", label: "PROPS", icon: icons.props },
             { id: "plants", label: "PLANTS", icon: icons.plants },
-            { id: "food", label: "FOOD", icon: icons.food }
+            { id: "food", label: "FOOD", icon: icons.food },
+            { id: "weapons", label: "WEAPONS", icon: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2 18 5.5l-2.5 2.5-3.5-3.5L14.5 2z"/><path d="m15.5 8 3.5 3.5-9 9L6.5 17l9-9z"/><path d="M3.5 20.5 8 16l-3-3-3 3 4.5 4.5z"/></svg>` }
         ];
 
         const tabsRow = document.createElement("div");
@@ -2684,6 +2943,7 @@ class BlockoutViewport {
             createAssetBtn("Point", "pointlight", true);
             createAssetBtn("Dir", "directionallight", true);
             createAssetBtn("Spot", "spotlight", true);
+            this.populateCustomAssets("lighting", targetRow);
         }
         
         prevRenderer.dispose();
@@ -2954,6 +3214,167 @@ class BlockoutViewport {
             const ptCounter = this.container.querySelector("#pt-sample-counter");
             if (ptCounter && this.isPathTracingEnabled) ptCounter.innerText = `0 / ${this.ptPreviewSamples}`;
         }
+    }
+
+
+    // =========================================================================
+    // HISTORY / UNDO-REDO
+    // =========================================================================
+
+    cloneMaterial(mat) {
+        if (!mat) return null;
+        if (Array.isArray(mat)) return mat.map(m => this.cloneMaterial(m));
+        if (typeof mat.clone !== 'function') return mat; // Safe fallback
+        const c = mat.clone();
+        return c;
+    }
+
+    cloneMeshForHistory(mesh) {
+        const c = mesh.clone();
+        
+        // Three.js .clone() destroys complex objects in userData via JSON.stringify.
+        // We must map the original nodes to the cloned nodes to properly clone materials.
+        const origNodes = [];
+        mesh.traverse(child => origNodes.push(child));
+        
+        let i = 0;
+        c.traverse(child => {
+            const orig = origNodes[i++];
+            if (!orig) return;
+
+            // Restore a proper shallow copy of userData
+            child.userData = Object.assign({}, orig.userData);
+
+            if (child.isMesh && orig.material) {
+                child.material = this.cloneMaterial(orig.material);
+                if (orig.userData.originalMaterial) {
+                    child.userData.originalMaterial = this.cloneMaterial(orig.userData.originalMaterial);
+                }
+                if (orig.userData.clayMat) {
+                    child.userData.clayMat = this.cloneMaterial(orig.userData.clayMat);
+                }
+            }
+        });
+        return c;
+    }
+
+    captureHistoryState() {
+        if (this.isRestoringHistory) return;
+        if (!this.isInitialized) return;
+
+        const snapshot = {
+            objectIdCounter: this.objectIdCounter,
+            selectedObjectId: this.selectedObjectId,
+            objects: this.sceneObjects.map(o => ({
+                id: o.id,
+                type: o.type,
+                name: o.name,
+                isFixed: o.isFixed,
+                visible: o.mesh.visible,
+                meshClone: this.cloneMeshForHistory(o.mesh)
+            }))
+        };
+
+        // Truncate future states if we are not at the end
+        if (this.historyIndex < this.historyStack.length - 1) {
+            this.historyStack = this.historyStack.slice(0, this.historyIndex + 1);
+        }
+
+        this.historyStack.push(snapshot);
+        if (this.historyStack.length > this.MAX_HISTORY) {
+            const evicted = this.historyStack.shift();
+            // Dispose GPU resources from evicted history snapshot to prevent memory leaks
+            evicted.objects.forEach(o => {
+                if (o.meshClone) {
+                    o.meshClone.traverse(c => {
+                        if (c.geometry) c.geometry.dispose();
+                        if (c.material) {
+                            const mats = Array.isArray(c.material) ? c.material : [c.material];
+                            mats.forEach(m => m.dispose());
+                        }
+                    });
+                }
+            });
+        }
+        this.historyIndex = this.historyStack.length - 1;
+        this.updateHistoryUI();
+    }
+
+    undo() {
+        if (this.historyIndex > 0) {
+            this.historyIndex--;
+            this.restoreHistoryState(this.historyStack[this.historyIndex]);
+        }
+    }
+
+    redo() {
+        if (this.historyIndex < this.historyStack.length - 1) {
+            this.historyIndex++;
+            this.restoreHistoryState(this.historyStack[this.historyIndex]);
+        }
+    }
+
+    restoreHistoryState(state) {
+        if (!state) return;
+        this.isRestoringHistory = true;
+
+        if (this.transformControls) this.transformControls.detach();
+
+        // Clear current scene objects
+        this.sceneObjects.forEach(entry => {
+            this.scene.remove(entry.mesh);
+            // We don't dispose geometries here because history meshes might share them!
+        });
+        this.sceneObjects = [];
+
+        this.objectIdCounter = state.objectIdCounter;
+
+        // Restore snapshot
+        state.objects.forEach(o => {
+            const restoredMesh = this.cloneMeshForHistory(o.meshClone);
+            restoredMesh.visible = o.visible;
+            
+            // Re-wire light targets for directional/spot lights
+            if (['directionallight', 'spotlight'].includes(o.type)) {
+                restoredMesh.traverse(child => {
+                    if (child.isDirectionalLight || child.isSpotLight) {
+                        const target = restoredMesh.children.find(c => c.isObject3D && !c.isLight && !c.isMesh && !c.userData?.isHelper);
+                        if (target) child.target = target;
+                    }
+                });
+            }
+
+            const entry = {
+                id: o.id,
+                type: o.type,
+                name: o.name,
+                isFixed: o.isFixed,
+                mesh: restoredMesh
+            };
+            this.scene.add(restoredMesh);
+            this.sceneObjects.push(entry);
+        });
+
+        // Re-apply display mode so materials match current shaded/textured state
+        this.updateDisplayMode();
+
+        this.refreshOutliner();
+        if (state.selectedObjectId) {
+            this.selectObjectById(state.selectedObjectId);
+        } else {
+            this.selectObjectById(null);
+        }
+
+        this.needsPtBvhUpdate = true;
+        this.needsPtReset = true;
+        
+        this.updateHistoryUI();
+        this.isRestoringHistory = false;
+    }
+
+    updateHistoryUI() {
+        if (this.btnUndo) this.btnUndo.style.opacity = this.historyIndex > 0 ? "1" : "0.3";
+        if (this.btnRedo) this.btnRedo.style.opacity = this.historyIndex < this.historyStack.length - 1 ? "1" : "0.3";
     }
 
     destroy() {
