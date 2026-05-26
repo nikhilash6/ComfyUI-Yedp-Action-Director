@@ -59,9 +59,25 @@ Instead of relying on jittery raw AI outputs, Mocap Surgeon provides a professio
 
 <img width="1487" height="975" alt="2cf391510075d117a07ca4f0faee57a2" src="https://github.com/user-attachments/assets/ed12f04e-ab02-4ec4-ad0f-cd397e42df46" />
 
-A user-friendly node meant to quickly build a 3D scene for generation, export GLB files directly to Yedp Action Director input folder.
+A user-friendly node meant to quickly build a 3D scene for generation, export GLB files directly to Yedp Action Director input folder. It acts both as its own renderer and a support node for building scenes quickly to use in the 3D compositor which is the Yedp Action Director node.
 
-**Currently in development!**
+Once your scene is set up, click the "BAKE" button to render **Textured** / **Shaded** / **Depth** / **Normal** outputs.
+
+### **✨ Blockout Key Features**
+
+* **Basic Shapes:** Easily drop in cubes, spheres, cylinders, and planes
+* **Asset Library:** It has organized tabs for things like Architecture, Vehicles, Furniture, Props, and Plants.
+* **PBR workflow:** you can load diffuse/metalness/roughness/normal maps
+* **Import Your Own:** You can upload your own custom 3D models (GLB, GLTF, or FBX formats) straight into the scene.
+* **Studio Lights:** You can add specific lights like spotlights, point lights, and sun-like directional lights, complete with real shadows and adjustable intensity.
+* **HDRI Environments:** You can load 360-degree images (HDRIs) to instantly give your scene realistic, real-world lighting and reflections.
+* **Path Tracing:** It has a built-in "Path Tracer".
+* **Size Reference:** You can toggle a "human silhouette" on and off to make sure the scale of your buildings and props looks correct.
+* **Undo/Redo:** Made a mistake? Just hit undo.
+* **Gizmos & Snapping:** Easy-to-use tools to move, rotate, and scale objects. You can also turn on "Grid Snapping" to perfectly align walls or floors.
+* **Save & Load:** You can save your entire 3D scene and load it back up later, so you never lose your work.
+
+It exports the 3D scene as a .glb file in the input folder Yedp Action Director import assets from by default.
 
 ## **🚀 What's New in V9.3 (Path Tracing, HDRI, Gaussian Splatting & Workflow Upgrades)**
 
