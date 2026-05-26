@@ -256,7 +256,7 @@ async def get_blockout_assets(request):
     """
     base_dir = os.path.join(os.path.dirname(__file__), "web", "blockout")
     assets = {}
-    categories = ["architecture", "vehicle", "furniture", "props", "plants", "food" ]
+    categories = ["architecture", "vehicle", "furniture", "props", "plants", "food", "weapons", "lighting"]
     
     for cat in categories:
         cat_dir = os.path.join(base_dir, cat)
@@ -304,13 +304,32 @@ async def upload_asset(request):
                 
                 file_path = os.path.join(target_dir, safe_name)
                 
-                # Stream the file in chunks
-                with open(file_path, "wb") as f:
+                temp_path = file_path + ".tmp"
+                
+                # Stream the file in chunks to a temporary file
+                with open(temp_path, "wb") as f:
                     while True:
                         chunk = await field.read_chunk()
                         if not chunk:
                             break
                         f.write(chunk)
+                
+                # Replace the original file with the temporary file
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                    os.rename(temp_path, file_path)
+                except PermissionError:
+                    # On Windows, if the user uploads a file from the destination folder, 
+                    # the browser locks the file for reading, causing os.remove to fail.
+                    # We can safely discard the temp file since the original is already in place.
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except:
+                            pass
+                except Exception as e:
+                    print(f"[Yedp] Error moving temp file: {e}")
                 
         if not file_path:
             return web.json_response({"status": "error", "message": "No file received"}, status=400)
